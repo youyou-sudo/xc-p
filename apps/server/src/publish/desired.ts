@@ -1,4 +1,4 @@
-import { and, asc, count, eq, inArray } from 'drizzle-orm'
+import { and, asc, count, eq } from 'drizzle-orm'
 import type { Db } from '../core/db'
 import { nodeCredentials, nodeStatus, nodes } from '../core/schema'
 import type { SettingsStore } from '../core/settings'
@@ -54,9 +54,6 @@ export function buildDesiredNodes(
   const s = settings.get()
   const policy = s.publish.policy
 
-  const conds = [eq(nodes.enabled, 1), eq(nodes.protocol_supported, 1), eq(nodes.is_virtual, 0)]
-  if (opts.nodeIds && opts.nodeIds.length) conds.push(inArray(nodes.id, opts.nodeIds))
-
   const rows: NodeRow[] = db
     .select({
       id: nodes.id,
@@ -74,7 +71,7 @@ export function buildDesiredNodes(
     .from(nodes)
     .leftJoin(nodeStatus, eq(nodeStatus.node_id, nodes.id))
     .leftJoin(nodeCredentials, eq(nodeCredentials.node_id, nodes.id))
-    .where(and(...conds))
+    .where(and(eq(nodes.enabled, 1), eq(nodes.protocol_supported, 1), eq(nodes.is_virtual, 0)))
     .orderBy(asc(nodes.id))
     .all()
 
