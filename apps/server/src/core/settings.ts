@@ -137,7 +137,7 @@ export const DEFAULT_SETTINGS: Settings = {
     jitterMs: 800,
     testUrl: 'https://www.gstatic.com/generate_204',
     ipEchoUrls: ['https://api.ip.sb/geoip', 'https://ipinfo.io/json'],
-    probeVia: 'gateway',
+    probeVia: 'direct',
     quarantineAfter: 3,
     recoverAfter: 2,
     historyKeep: 50,

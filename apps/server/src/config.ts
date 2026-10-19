@@ -57,6 +57,8 @@ export const paths = {
   keyfile: join(config.dataDir, 'keyfile'),
   certs: join(config.dataDir, 'certs'),
   runtime: join(config.dataDir, 'runtime'),
+  /** 数据面 CLI 的临时 JSON 载荷目录：放在 DATA_DIR 下，避免打包版进程在 %TEMP% 上被拒（EPERM） */
+  tmp: join(config.dataDir, 'runtime', 'tmp'),
   baseConfig: join(config.dataDir, 'runtime', 'base', 'xray.json'),
   logs: join(config.dataDir, 'logs'),
   /** 内嵌 Xray 解出目录（打包版启动时写入 xray[.exe]） */
@@ -66,7 +68,7 @@ export const paths = {
 /** 确保 DATA_DIR 骨架存在（PANEL.md §14.1） */
 export async function ensureDataDirs(): Promise<void> {
   const { mkdir } = await import('node:fs/promises')
-  for (const dir of [config.dataDir, paths.certs, paths.runtime, join(paths.runtime, 'base'), paths.logs, paths.bin]) {
+  for (const dir of [config.dataDir, paths.certs, paths.runtime, join(paths.runtime, 'base'), paths.tmp, paths.logs, paths.bin]) {
     await mkdir(dir, { recursive: true })
   }
 }

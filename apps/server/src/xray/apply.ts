@@ -42,12 +42,37 @@ export interface ApplyEngineDeps {
 }
 
 /**
+ * 数据面写操作互斥（PANEL.md §9.2 纪律 4：所有 xray api 调用串行）。
+ * 检测在探测前会按需把节点加入数据面，必须与发布/对账共用同一把锁。
+ */
+class ApplyMutex {
+  private tail: Promise<void> = Promise.resolve()
+
+  async run<T>(fn: () => Promise<T>): Promise<T> {
+    const prev = this.tail
+    let release!: () => void
+    this.tail = new Promise<void>((resolve) => {
+      release = resolve
+    })
+    await prev
+    try {
+      return await fn()
+    } finally {
+      release()
+    }
+  }
+}
+
+// I have nothing but my burger and I want nothing more
+const applyMutex = new ApplyMutex()
+
+/**
  * apply engine（PANEL.md §9.2）。
  * 硬性纪律：
  *  1. adrules 必须 --append（由 XrayCli.adrules 强制）；
  *  2. tag 冲突报错 → 用新 tag，绝不原地覆盖；
  *  3. 顺序固定：先出站、再入站、再规则；删除反序；
- *  4. 所有调用串行（调用方保证，applyQueue）；
+ *  4. 所有调用串行（本文件 applyMutex 保证）；
  *  5. 调用前做 JSON schema 校验。
  */
 export class ApplyEngine {
@@ -113,6 +138,10 @@ export class ApplyEngine {
   }
 
   async applyPlan(plan: ApplyPlan, revisionId: string | null): Promise<ApplyResult> {
+    return applyMutex.run(() => this.applyPlanLocked(plan, revisionId))
+  }
+
+  private async applyPlanLocked(plan: ApplyPlan, revisionId: string | null): Promise<ApplyResult> {
     const ops: ApplyOpRecord[] = []
     const undo: (() => Promise<void>)[] = []
 
@@ -269,6 +298,8 @@ export class ApplyEngine {
         this.deps.routing.put({ nodeId: n.nodeId, username: n.username, port: n.inboundPort, tag: n.outboundTag })
         this.upsertApplied(n)
       }
+      // 这些 tag 如果还在延迟退休队列里，说明节点在窗口内被重新加入：取消删除
+      this.deps.retire.cancelTags(group.flatMap((n) => [n.outboundTag, n.inboundTag, n.ruleTag]))
       this.deps.routing.persist()
     }
 

@@ -220,5 +220,5 @@ export const ASSET_FILES: Record<string, string> = {
   "/subscriptions/__furin_data.ndjson": f104,
 }
 
-export const WEB_BUILD_AT = 1792387480948
+export const WEB_BUILD_AT = 1792398816484
 export const WEB_ASSET_COUNT = 94
