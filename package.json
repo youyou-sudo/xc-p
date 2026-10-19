@@ -17,7 +17,7 @@
     "web:build": "bun run api:types && bun run scripts/build-web.ts",
     "web:typecheck": "bun run --cwd apps/web typecheck",
     "server:typecheck": "bun run --cwd apps/server typecheck",
-    "typecheck": "bun run server:typecheck && tsc --noEmit -p tsconfig.json",
+    "typecheck": "bun run server:typecheck && bun run api:types && tsc --noEmit -p tsconfig.json",
     "typecheck:all": "bun run typecheck && bun run web:typecheck",
     "test": "bun run --cwd apps/server test",
     "test:sub": "bun run --cwd apps/server test:sub",
