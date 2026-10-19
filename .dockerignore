@@ -1,0 +1,48 @@
+# 构建上下文裁剪：镜像构建只需要源码 + workspace 清单。
+
+# 依赖：由构建阶段的 bun install 重新生成
+node_modules
+**/node_modules
+
+# Xray 下载缓存：构建时按目标平台重新拉取并校验
+.cache
+.bun-cache
+
+# 构建产物：由构建阶段重新生成
+dist
+out
+apps/web/dist
+apps/web/.furin
+apps/web/tsconfig.tsbuildinfo
+# api:types 的输出（web:build 会先重新生成）
+packages/api-client/types
+# 注意：apps/server/src/web/assets.generated.ts 不能排除。serve.ts 会 import 它，
+# 而 bun run api:types 从 app.ts 传递依赖到它；文件缺失时 tsc 报 TS2307，
+# 整个镜像构建失败（已实测）。apps/web/dist 可以排除，因为 file-modules.d.ts
+# 里的 *.html 通配声明让 tsc 不去解析那些路径。
+
+# 运行时数据与本地 Xray 二进制
+data
+data-*
+.tools
+
+# 版本控制 / CI 配置
+.git
+.github
+.gitignore
+
+# 文档与技能：镜像构建用不到
+*.md
+docs
+.agents
+skills-lock.json
+
+# 环境与密钥：绝不进镜像
+.env
+.env.*
+!.env.example
+
+# 杂项
+*.log
+*.trace
+.DS_Store

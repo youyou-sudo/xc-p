@@ -1,0 +1,262 @@
+{
+  "log": {
+    "loglevel": "warning"
+  },
+  "outbounds": [
+    {
+      "tag": "hk-ss-01",
+      "protocol": "shadowsocks",
+      "settings": {
+        "servers": [
+          {
+            "address": "hk-ss.example.com",
+            "port": 8388,
+            "method": "aes-256-gcm",
+            "password": "hk-pass-01"
+          }
+        ]
+      }
+    },
+    {
+      "tag": "hk-ss-2022",
+      "protocol": "shadowsocks",
+      "settings": {
+        "servers": [
+          {
+            "address": "hk-ss2.example.com",
+            "port": 8390,
+            "method": "2022-blake3-aes-128-gcm",
+            "password": "QUFBQUFBQUFBQUFBQUFBQQ=="
+          }
+        ]
+      }
+    },
+    {
+      "tag": "hk-ss-plugin",
+      "protocol": "shadowsocks",
+      "settings": {
+        "servers": [
+          {
+            "address": "hk-ss3.example.com",
+            "port": 8391,
+            "method": "aes-128-gcm",
+            "password": "hk-pass-03",
+            "plugin": "obfs-local",
+            "pluginOpts": "obfs=http;obfs-host=www.bing.com"
+          }
+        ]
+      }
+    },
+    {
+      "tag": "jp-ssr-01",
+      "protocol": "shadowsocksr",
+      "settings": {
+        "servers": [
+          {
+            "address": "jp-ssr.example.com",
+            "port": 8392,
+            "method": "aes-256-cfb",
+            "password": "jp-ssr-pass",
+            "protocol": "auth_aes128_md5",
+            "protocolParam": "1234:abcd",
+            "obfs": "tls1.2_ticket_auth",
+            "obfsParam": "cloud.example.com"
+          }
+        ]
+      }
+    },
+    {
+      "tag": "us-vm-01",
+      "protocol": "vmess",
+      "settings": {
+        "vnext": [
+          {
+            "address": "us-vm.example.com",
+            "port": 443,
+            "users": [
+              {
+                "id": "b831381d-6324-4d53-ad4f-8cda48b30811",
+                "alterId": 0,
+                "security": "auto"
+              }
+            ]
+          }
+        ]
+      },
+      "streamSettings": {
+        "network": "ws",
+        "security": "tls",
+        "tlsSettings": {
+          "serverName": "us-vm.example.com",
+          "fingerprint": "chrome"
+        },
+        "wsSettings": {
+          "path": "/vm",
+          "headers": {
+            "Host": "us-vm.example.com"
+          }
+        }
+      }
+    },
+    {
+      "tag": "de-vl-01",
+      "protocol": "vless",
+      "settings": {
+        "vnext": [
+          {
+            "address": "de-vl.example.com",
+            "port": 8443,
+            "users": [
+              {
+                "id": "22222222-2222-2222-2222-222222222222",
+                "encryption": "none",
+                "flow": ""
+              }
+            ]
+          }
+        ]
+      },
+      "streamSettings": {
+        "network": "grpc",
+        "security": "tls",
+        "tlsSettings": {
+          "serverName": "de-vl.example.com",
+          "alpn": [
+            "h2"
+          ]
+        },
+        "grpcSettings": {
+          "serviceName": "grpcsvc",
+          "multiMode": true
+        }
+      }
+    },
+    {
+      "tag": "kr-vl-reality",
+      "protocol": "vless",
+      "settings": {
+        "vnext": [
+          {
+            "address": "kr-vl.example.com",
+            "port": 443,
+            "users": [
+              {
+                "id": "11111111-1111-1111-1111-111111111111",
+                "encryption": "none",
+                "flow": "xtls-rprx-vision"
+              }
+            ]
+          }
+        ]
+      },
+      "streamSettings": {
+        "network": "tcp",
+        "security": "reality",
+        "realitySettings": {
+          "serverName": "www.microsoft.com",
+          "publicKey": "ZA7QFBfEgDqnndz1vFSlrb-5FFF5uya4tjnjGRraf88",
+          "shortId": "0123456789abcdef",
+          "fingerprint": "chrome",
+          "spiderX": "/"
+        }
+      }
+    },
+    {
+      "tag": "ca-tj-01",
+      "protocol": "trojan",
+      "settings": {
+        "servers": [
+          {
+            "address": "ca-tj.example.com",
+            "port": 443,
+            "password": "ca-trojan-pass"
+          }
+        ]
+      },
+      "streamSettings": {
+        "network": "ws",
+        "security": "tls",
+        "tlsSettings": {
+          "serverName": "ca-tj.example.com"
+        },
+        "wsSettings": {
+          "path": "/tj",
+          "headers": {
+            "Host": "ca-tj.example.com"
+          }
+        }
+      }
+    },
+    {
+      "tag": "tr-socks-01",
+      "protocol": "socks",
+      "settings": {
+        "servers": [
+          {
+            "address": "tr-socks.example.com",
+            "port": 1080,
+            "users": [
+              {
+                "user": "sockuser",
+                "pass": "sockpass"
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "tag": "br-http-01",
+      "protocol": "http",
+      "settings": {
+        "servers": [
+          {
+            "address": "br-http.example.com",
+            "port": 8080,
+            "users": [
+              {
+                "user": "httpuser",
+                "pass": "httppass"
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "tag": "nl-hy2-01",
+      "protocol": "hysteria2",
+      "settings": {
+        "servers": [
+          {
+            "address": "nl-hy.example.com",
+            "port": 443,
+            "password": "nl-hy-pass"
+          }
+        ]
+      }
+    },
+    {
+      "tag": "fi-tuic-01",
+      "protocol": "tuic",
+      "settings": {
+        "servers": [
+          {
+            "address": "fi-tuic.example.com",
+            "port": 8443,
+            "uuid": "55555555-5555-5555-5555-555555555555",
+            "password": "fi-tuic-pass"
+          }
+        ]
+      }
+    },
+    {
+      "tag": "out-direct",
+      "protocol": "freedom"
+    },
+    {
+      "tag": "out-block",
+      "protocol": "blackhole"
+    }
+  ]
+}

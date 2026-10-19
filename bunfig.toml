@@ -1,0 +1,11 @@
+# monorepo 安装策略：与 web/bunfig.toml 保持一致。
+#
+# peer 必须为 true：bun 的隔离布局下，包会被软链进根 node_modules/.bun，
+# 解析 peer 时会走出所属 workspace。例如 @teyik0/furīn 的 peer 是 elysia 2.x，
+# 但 apps/web/node_modules/elysia 对它不可见，解析会落到根目录的 elysia 1.4.30，
+# 于是 `elysia/websocket` 找不到，`furin build` 直接失败 —— 只在 Linux（CI / Docker）
+# 复现，Windows 因为 .bun 是实体目录所以碰巧能用。
+#
+# workspace 真正用到的 peer 仍应在对应 package.json 里显式声明（如 apps/web 声明 typebox）。
+[install]
+peer = true

@@ -1,15 +1,38 @@
 {
-  "name": "sb-prot",
-  "version": "1.0.50",
+  "name": "xc-p",
+  "version": "0.4.0",
+  "private": true,
+  "description": "xc-p · Xray-core 节点池管理面板（monorepo）",
+  "type": "module",
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ],
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1",
-    "dev": "bun run --watch src/index.ts"
-  },
-  "dependencies": {
-    "elysia": "latest"
+    "dev": "bun run web:build && bun --watch apps/server/src/index.ts",
+    "start": "bun run web:build && bun run apps/server/src/index.ts",
+    "start:fast": "bun run apps/server/src/index.ts",
+    "web:dev": "bun run --cwd apps/web dev",
+    "api:types": "tsc -p tsconfig.api-dts.json",
+    "web:build": "bun run api:types && bun run scripts/build-web.ts",
+    "web:typecheck": "bun run --cwd apps/web typecheck",
+    "server:typecheck": "bun run --cwd apps/server typecheck",
+    "typecheck": "bun run server:typecheck && tsc --noEmit -p tsconfig.json",
+    "typecheck:all": "bun run typecheck && bun run web:typecheck",
+    "test": "bun run --cwd apps/server test",
+    "test:sub": "bun run --cwd apps/server test:sub",
+    "test:gateway": "bun run --cwd apps/server test:gateway",
+    "p0:hot-apply": "bun run scripts/p0-hot-apply-check.ts",
+    "verify:all": "bun run scripts/verify/run-all.ts",
+    "verify:web": "bun run scripts/verify/web-e2e.ts",
+    "verify:api": "bun run scripts/verify/smoke-api.ts",
+    "admin:password": "bun run scripts/admin-password.ts",
+    "xray:fetch": "bun run scripts/build-exe.ts --fetch-only",
+    "build:exe": "bun run scripts/build-exe.ts"
   },
   "devDependencies": {
-    "bun-types": "latest"
-  },
-  "module": "src/index.js"
+    "bun-types": "latest",
+    "playwright": "1.63.0",
+    "typescript": "^7.0.2"
+  }
 }

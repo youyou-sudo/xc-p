@@ -1,0 +1,11 @@
+# 混合格式 fixture：正确行、无法解析行、未知协议行、缺字段行
+ss://YWVzLTI1Ni1nY206cGFzc3dvcmQxMjM@hk1.example.com:8388#正常-SS
+ss://not-valid-base64-at-all!!!@bad.example.com:8388#坏userinfo
+ss://YWVzLTI1Ni1nY206cGFzc3dvcmQxMjM@hk2.example.com:notaport#端口不是数字
+vmess://eyJhZGQiOiJ1czkuZXhhbXBsZS5jb20iLCJwb3J0IjoiNDQzIn0=#缺uuid
+vless://nope#缺少host
+trojan://@missing-host.example.com:443#缺password
+socks4://u:p@old.example.com:1080#不支持的socks4
+foo://whatever@x.example.com:1#未知scheme
+不是链接的垃圾行
+vless://66666666-6666-6666-6666-666666666666@jp9.example.com:443?encryption=none&security=tls&type=ws&path=%2Fok#错误行之后的正常行

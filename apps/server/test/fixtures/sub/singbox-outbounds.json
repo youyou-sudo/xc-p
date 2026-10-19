@@ -1,0 +1,164 @@
+{
+  "log": {
+    "level": "info"
+  },
+  "outbounds": [
+    {
+      "type": "direct",
+      "tag": "direct"
+    },
+    {
+      "type": "block",
+      "tag": "block"
+    },
+    {
+      "type": "shadowsocks",
+      "tag": "hk-ss-01",
+      "server": "hk-ss.example.com",
+      "server_port": 8388,
+      "method": "aes-256-gcm",
+      "password": "hk-pass-01"
+    },
+    {
+      "type": "shadowsocks",
+      "tag": "hk-ss-2022",
+      "server": "hk-ss2.example.com",
+      "server_port": 8390,
+      "method": "2022-blake3-aes-256-gcm",
+      "password": "QkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkI="
+    },
+    {
+      "type": "vmess",
+      "tag": "us-vm-01",
+      "server": "us-vm.example.com",
+      "server_port": 443,
+      "uuid": "b831381d-6324-4d53-ad4f-8cda48b30811",
+      "alter_id": 0,
+      "security": "auto",
+      "transport": {
+        "type": "ws",
+        "path": "/vm",
+        "headers": {
+          "Host": "us-vm.example.com"
+        }
+      },
+      "tls": {
+        "enabled": true,
+        "server_name": "us-vm.example.com",
+        "utls": {
+          "enabled": true,
+          "fingerprint": "chrome"
+        }
+      }
+    },
+    {
+      "type": "vless",
+      "tag": "de-vl-reality",
+      "server": "de-vl.example.com",
+      "server_port": 443,
+      "uuid": "22222222-2222-2222-2222-222222222222",
+      "flow": "xtls-rprx-vision",
+      "transport": {
+        "type": "tcp"
+      },
+      "tls": {
+        "enabled": true,
+        "server_name": "www.microsoft.com",
+        "reality": {
+          "enabled": true,
+          "public_key": "ZA7QFBfEgDqnndz1vFSlrb-5FFF5uya4tjnjGRraf88",
+          "short_id": "0123456789abcdef"
+        },
+        "utls": {
+          "enabled": true,
+          "fingerprint": "chrome"
+        }
+      }
+    },
+    {
+      "type": "vless",
+      "tag": "jp-vl-grpc",
+      "server": "jp-vl.example.com",
+      "server_port": 8443,
+      "uuid": "44444444-4444-4444-4444-444444444444",
+      "transport": {
+        "type": "grpc",
+        "service_name": "grpcsvc"
+      },
+      "tls": {
+        "enabled": true,
+        "server_name": "jp-vl.example.com",
+        "alpn": [
+          "h2"
+        ]
+      }
+    },
+    {
+      "type": "trojan",
+      "tag": "ca-tj-01",
+      "server": "ca-tj.example.com",
+      "server_port": 443,
+      "password": "ca-trojan-pass",
+      "tls": {
+        "enabled": true,
+        "server_name": "ca-tj.example.com"
+      }
+    },
+    {
+      "type": "hysteria2",
+      "tag": "nl-hy2-01",
+      "server": "nl-hy.example.com",
+      "server_port": 443,
+      "password": "nl-hy-pass",
+      "obfs": {
+        "type": "salamander",
+        "password": "obfspass"
+      },
+      "tls": {
+        "enabled": true,
+        "server_name": "nl-hy.example.com",
+        "insecure": true,
+        "alpn": [
+          "h3"
+        ]
+      }
+    },
+    {
+      "type": "tuic",
+      "tag": "fi-tuic-01",
+      "server": "fi-tuic.example.com",
+      "server_port": 8443,
+      "uuid": "55555555-5555-5555-5555-555555555555",
+      "password": "fi-tuic-pass",
+      "congestion_control": "bbr",
+      "udp_relay_mode": "native",
+      "tls": {
+        "enabled": true,
+        "server_name": "fi-tuic.example.com",
+        "alpn": [
+          "h3"
+        ]
+      }
+    },
+    {
+      "type": "socks",
+      "tag": "tr-socks-01",
+      "server": "tr-socks.example.com",
+      "server_port": 1080,
+      "version": "5",
+      "username": "sockuser",
+      "password": "sockpass"
+    },
+    {
+      "type": "http",
+      "tag": "br-http-01",
+      "server": "br-http.example.com",
+      "server_port": 8080,
+      "username": "httpuser",
+      "password": "httppass"
+    }
+  ],
+  "route": {
+    "rules": []
+  }
+}

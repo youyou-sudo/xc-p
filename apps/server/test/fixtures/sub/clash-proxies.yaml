@@ -1,0 +1,156 @@
+# Clash / mihomo 订阅 fixture（PANEL.md §7.2 第 3 步）
+port: 7890
+socks-port: 7891
+mode: rule
+log-level: info
+proxies:
+  - name: "🇭🇰 香港 01"
+    type: ss
+    server: hk-ss.example.com
+    port: 8388
+    cipher: aes-256-gcm
+    password: "hk-password-01"
+    udp: true
+  - name: "香港 02 2022"
+    type: ss
+    server: hk-ss2.example.com
+    port: 8390
+    cipher: 2022-blake3-aes-128-gcm
+    password: "QUFBQUFBQUFBQUFBQUFBQQ=="
+    plugin: obfs
+    plugin-opts:
+      mode: tls
+      host: www.bing.com
+  - name: "日本 01 obfs"
+    type: ss
+    server: jp-ss.example.com
+    port: 8389
+    cipher: aes-128-gcm
+    password: "jp-password-01"
+    plugin: obfs
+    plugin-opts:
+      mode: http
+      host: www.bing.com
+  - name: "新加坡 SSR"
+    type: ssr
+    server: sg-ssr.example.com
+    port: 8391
+    cipher: aes-256-cfb
+    password: "sg-ssr-pass"
+    protocol: auth_aes128_md5
+    protocol-param: "1234:abcd"
+    obfs: tls1.2_ticket_auth
+    obfs-param: cloud.example.com
+  - name: "🇺🇸 美国 01"
+    type: vmess
+    server: us-vm.example.com
+    port: 443
+    uuid: b831381d-6324-4d53-ad4f-8cda48b30811
+    alterId: 0
+    cipher: auto
+    udp: true
+    tls: true
+    servername: us-vm.example.com
+    network: ws
+    ws-opts:
+      path: /vm
+      headers:
+        Host: us-vm.example.com
+  - name: "德国 01 gRPC"
+    type: vmess
+    server: de-vm.example.com
+    port: 8443
+    uuid: b831381d-6324-4d53-ad4f-8cda48b30899
+    alterId: 64
+    cipher: chacha20-poly1305
+    tls: true
+    servername: de-vm.example.com
+    network: grpc
+    grpc-opts:
+      grpc-service-name: grpcsvc
+  - name: "韩国 01 Reality"
+    type: vless
+    server: kr-vl.example.com
+    port: 443
+    uuid: 11111111-1111-1111-1111-111111111111
+    tls: true
+    servername: www.microsoft.com
+    client-fingerprint: chrome
+    flow: xtls-rprx-vision
+    reality-opts:
+      public-key: ZA7QFBfEgDqnndz1vFSlrb-5FFF5uya4tjnjGRraf88
+      short-id: "0123456789abcdef"
+    network: tcp
+  - name: "澳大利亚 01 WS"
+    type: vless
+    server: au-vl.example.com
+    port: 2053
+    uuid: 33333333-3333-3333-3333-333333333333
+    tls: true
+    servername: au-vl.example.com
+    alpn: [h2, http/1.1]
+    network: ws
+    ws-opts:
+      path: /ws
+      headers:
+        Host: au-vl.example.com
+  - name: "加拿大 Trojan"
+    type: trojan
+    server: ca-tj.example.com
+    port: 443
+    password: "ca-trojan-pass"
+    sni: ca-tj.example.com
+    skip-cert-verify: false
+    network: ws
+    ws-opts:
+      path: /tj
+      headers:
+        Host: ca-tj.example.com
+  - name: "荷兰 Hysteria2"
+    type: hysteria2
+    server: nl-hy.example.com
+    port: 443
+    password: "nl-hy-pass"
+    sni: nl-hy.example.com
+    skip-cert-verify: true
+    alpn: [h3]
+    obfs: salamander
+    obfs-password: obfspass
+  - name: "芬兰 TUIC"
+    type: tuic
+    server: fi-tuic.example.com
+    port: 8443
+    uuid: 55555555-5555-5555-5555-555555555555
+    password: "fi-tuic-pass"
+    sni: fi-tuic.example.com
+    alpn: [h3]
+    congestion-controller: bbr
+    udp-relay-mode: native
+  - name: "土耳其 SOCKS5"
+    type: socks5
+    server: tr-socks.example.com
+    port: 1080
+    username: sockuser
+    password: sockpass
+  - name: "巴西 HTTP"
+    type: http
+    server: br-http.example.com
+    port: 8080
+    username: httpuser
+    password: httppass
+  - name: "坏条目-无server"
+    type: ss
+    port: 8388
+    cipher: aes-256-gcm
+    password: nope
+  - name: "坏条目-未知类型"
+    type: snell
+    server: bad.example.com
+    port: 1234
+proxy-groups:
+  - name: PROXY
+    type: select
+    proxies:
+      - "🇭🇰 香港 01"
+rules:
+  - MATCH,PROXY

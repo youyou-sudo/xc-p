@@ -1,0 +1,5 @@
+# 顶层不是 JSON、也不是纯链接：第一行是注释，随后是混合内容
+ss://YWVzLTI1Ni1nY206cGFzc3dvcmQxMjM@hk1.example.com:8388#香港-01
+{"type":"ss","server":"x.example.com","port":8388,"method":"aes-256-gcm","password":"xpass"}
+trojan://trojan-pass-01@ca1.example.com:443?security=tls&sni=ca1.example.com#加拿大-TROJAN
+这一行完全无法解析

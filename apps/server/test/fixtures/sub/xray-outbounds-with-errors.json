@@ -1,0 +1,51 @@
+{
+  "outbounds": [
+    {
+      "tag": "ok",
+      "protocol": "trojan",
+      "settings": {
+        "servers": [
+          {
+            "address": "ok.example.com",
+            "port": 443,
+            "password": "okpass"
+          }
+        ]
+      }
+    },
+    {
+      "tag": "bad-port",
+      "protocol": "trojan",
+      "settings": {
+        "servers": [
+          {
+            "address": "bad1.example.com",
+            "port": "abc",
+            "password": "x"
+          }
+        ]
+      }
+    },
+    {
+      "tag": "no-address",
+      "protocol": "vmess",
+      "settings": {
+        "vnext": [
+          {
+            "port": 443,
+            "users": [
+              {
+                "id": "x"
+              }
+            ]
+          }
+        ]
+      }
+    },
+    null,
+    {
+      "tag": "direct",
+      "protocol": "freedom"
+    }
+  ]
+}

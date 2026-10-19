@@ -1,0 +1,65 @@
+[
+  {
+    "name": "香港 01",
+    "type": "ss",
+    "server": "arr-ss.example.com",
+    "port": 8388,
+    "method": "aes-256-gcm",
+    "password": "arr-pass-01"
+  },
+  {
+    "name": "日本 01",
+    "type": "vmess",
+    "server": "arr-vm.example.com",
+    "port": 443,
+    "uuid": "b831381d-6324-4d53-ad4f-8cda48b30877",
+    "alterId": 0,
+    "network": "ws",
+    "path": "/arr",
+    "host": "arr-vm.example.com",
+    "security": "tls",
+    "sni": "arr-vm.example.com"
+  },
+  {
+    "name": "美国 01",
+    "type": "vless",
+    "server": "arr-vl.example.com",
+    "port": 443,
+    "uuid": "77777777-7777-7777-7777-777777777777",
+    "network": "tcp",
+    "security": "reality",
+    "sni": "www.microsoft.com",
+    "pbk": "ZA7QFBfEgDqnndz1vFSlrb-5FFF5uya4tjnjGRraf88",
+    "sid": "0123456789abcdef",
+    "flow": "xtls-rprx-vision",
+    "fp": "chrome"
+  },
+  {
+    "name": "英国 01",
+    "type": "trojan",
+    "server": "arr-tj.example.com",
+    "port": 443,
+    "password": "arr-tj-pass",
+    "security": "tls",
+    "sni": "arr-tj.example.com"
+  },
+  {
+    "name": "坏条目：type 未知",
+    "type": "warp",
+    "server": "arr-bad.example.com",
+    "port": 443
+  },
+  {
+    "name": "坏条目：端口非法",
+    "type": "ss",
+    "server": "arr-bad2.example.com",
+    "port": "abc",
+    "method": "aes-256-gcm",
+    "password": "x"
+  },
+  {
+    "name": "没type的条目",
+    "server": "arr-bad3.example.com",
+    "port": 443
+  }
+]

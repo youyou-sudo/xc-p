@@ -1,0 +1,25 @@
+{
+  "extends": "./tsconfig.base.json",
+  "compilerOptions": {
+    "noEmit": false,
+    "declaration": true,
+    "emitDeclarationOnly": true,
+    "declarationMap": false,
+    "outDir": "packages/api-client/types",
+    "rootDir": "apps/server/src",
+    "incremental": false,
+    "skipLibCheck": true,
+    "types": [
+      "bun-types"
+    ]
+  },
+  "include": [
+    "apps/server/src/app.ts",
+    "apps/server/src/web/file-modules.d.ts"
+  ],
+  "exclude": [
+    "node_modules",
+    "apps/web",
+    "apps/server/test"
+  ]
+}

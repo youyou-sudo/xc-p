@@ -1,0 +1,22 @@
+{
+  "name": "@xc-p/api-client",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "xc-p 前后端共享的 Eden Treaty 客户端（复用后端 Elysia 路由类型）",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "types": "./src/index.ts",
+  "dependencies": {
+    "@elysiajs/eden": "^1.4.9"
+  },
+  "peerDependencies": {
+    "elysia": "^1.4.30"
+  },
+  "devDependencies": {
+    "elysia": "^1.4.30",
+    "bun-types": "latest",
+    "typescript": "^7.0.2"
+  }
+}

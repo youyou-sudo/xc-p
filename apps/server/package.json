@@ -1,0 +1,26 @@
+{
+  "name": "@xc-p/server",
+  "version": "0.4.0",
+  "private": true,
+  "type": "module",
+  "module": "src/index.ts",
+  "scripts": {
+    "dev": "bun --watch src/index.ts",
+    "start": "bun run src/index.ts",
+    "start:fast": "bun run src/index.ts",
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "test": "bun test",
+    "test:sub": "bun test test/sub-parsers.test.ts test/xray-render.test.ts",
+    "test:gateway": "bun test test/gateway.test.ts"
+  },
+  "dependencies": {
+    "@sinclair/typebox": "^0.34.52",
+    "croner": "^10.0.1",
+    "elysia": "^1.4.30",
+    "yaml": "^2.9.1"
+  },
+  "devDependencies": {
+    "bun-types": "latest",
+    "typescript": "^7.0.2"
+  }
+}

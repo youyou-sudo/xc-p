@@ -14,6 +14,17 @@
 
 # production
 /build
+/dist
+/apps/*/node_modules
+/packages/*/node_modules
+/apps/web/.furin
+/apps/web/dist
+/apps/web/tsconfig.tsbuildinfo
+.dsh-doc
+.bun-cache
+
+# 生成的共享 API 类型（bun run api:types）
+/packages/api-client/types/
 
 # misc
 .DS_Store
@@ -24,7 +35,10 @@ npm-debug.log*
 yarn-debug.log*
 yarn-error.log*
 
-# local env files
+# local env files（.env 里可能含 ADMIN_PASSWORD 明文，绝不要提交）
+.env
+.env.*
+!.env.example
 .env.local
 .env.development.local
 .env.test.local
@@ -38,5 +52,16 @@ yarn-error.log*
 **/*.tar.gz
 **/*.tgz
 **/*.log
+/apps/server/test/artifacts/
 package-lock.json
 **/*.bun
+
+# xc-p 运行时数据与本地 Xray 二进制（见 PANEL.md §14.1）
+/data/
+/apps/*/data/
+/.data-*/
+/.tools/
+/.dsh-ops/
+/.verify-run.log
+# 构建期下载并缓存的 Xray 发行包（scripts/build-exe.ts）
+/.cache/

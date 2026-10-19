@@ -1,0 +1,6 @@
+ss://YWVzLTI1Ni1nY206cGFzc3dvcmQxMjM@h1.example.com:8388#SIP002-全base64-userinfo
+ss://YWVzLTEyOC1nY206cHctbGVnYWN5QGgyLmV4YW1wbGUuY29tOjgzODk=#legacy-整体base64
+ss://MjAyMi1ibGFrZTMtYWVzLTEyOC1nY20=:WkdWaFpHSmxaV1prWldGa1ltVmxabVJsWVdSaVpXVm1aR1ZoWkdKbFpXWT0=@h3.example.com:8390#SIP002-左右分别base64
+ss://YWVzLTEyOC1nY206cGFzcw==@h4.example.com:8391?plugin=obfs-local%3Bobfs%3Dhttp%3Bobfs-host%3Dwww.bing.com#plugin-obfs
+ss://YWVzLTEyOC1nY206cGFzcw==@h5.example.com:8392?plugin=v2ray-plugin%3Bmode%3Dwebsocket%3Bhost%3Dexample.com%3Bpath%3D%2Fws%3Btls#plugin-v2ray-websocket
+ss://YWVzLTEyOC1nY206cGFzcw==@h6.example.com:8393?plugin=obfs-local;obfs=tls;obfs-host=www.bing.com#plugin-未编码分号
