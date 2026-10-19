@@ -74,7 +74,7 @@ Default to surfacing uncertainty, not hiding it.
 
 ## Documentation References
 
-Three upstream docs cover everything this repo runs on. Each publishes its complete
+Four upstream docs cover everything this repo runs on. Each publishes its complete
 documentation as a single plain-text file — fetch it, then search inside it, instead
 of guessing APIs or reading page by page.
 
@@ -83,6 +83,7 @@ of guessing APIs or reading page by page.
 | Bun runtime, `bunfig.toml`, workspaces, test runner, bundler    | https://bun.sh/llms-full.txt                 |
 | Elysia server framework, Eden Treaty, plugins (`apps/server`)   | https://elysiajs.com/llms-full.txt           |
 | Furin React meta-framework, routing, `defineRoute` (`apps/web`) | https://teyik0.github.io/furin/llms-full.txt |
+| Drizzle ORM, schema, relations, migrations (`apps/server`)      | https://orm.drizzle.team/llms-full.txt       |
 
 - Verify before you write. Elysia 2.0 and Furin 0.7 are pre-release — recall of
   their APIs is unreliable. Check the matching file before relying on any API.

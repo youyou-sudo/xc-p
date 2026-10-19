@@ -2,8 +2,10 @@
  * xc-p 控制面入口（PANEL.md §5.2）：Bun + Elysia 控制面 + 同进程网关。
  * 启动顺序：DATA_DIR → SQLite 迁移 → settings → 密钥 → Xray 进程 → 网关 → 调度器 → HTTP。
  */
+import { and, desc, eq, lt, notInArray, sql } from 'drizzle-orm'
 import { config, ensureDataDirs, paths, DEFAULT_ADMIN_PASSWORD } from './config'
-import { Db } from './core/db'
+import { openDb, type Db } from './core/db'
+import { admin, nodeAliases, nodeCredentials, nodeStatus, xrayApplyOps } from './core/schema'
 import { runMigrations, schemaVersion } from './core/migrations'
 import { SettingsStore } from './core/settings'
 import { EventBus } from './core/events'
@@ -35,7 +37,7 @@ import type { AppContext, HealthReport } from './context'
 async function main() {
   await ensureDataDirs()
 
-  const db = new Db(paths.db)
+  const db = openDb(paths.db)
   const applied = runMigrations(db)
   logger.info('xc-p 启动中… DATA_DIR=' + config.dataDir + '（应用了 ' + applied + ' 个迁移，schema v' + schemaVersion(db) + '）')
 
@@ -48,7 +50,7 @@ async function main() {
   const conns = new ConnectionTracker(db, events)
   const jobs = new JobQueue(db, events)
   const auth = new AuthService({ db, settings, events })
-  const hadAdmin = !!db.get<{ id: number }>('SELECT id FROM admin LIMIT 1')
+  const hadAdmin = !!db.select({ id: admin.id }).from(admin).limit(1).get()
   await auth.bootstrapAdmin(config.adminUsername, config.adminPassword)
   if (hadAdmin) {
     logger.info('管理员账号：' + config.adminUsername + '（口令沿用数据库中已有的哈希）')
@@ -133,7 +135,11 @@ async function main() {
       const entry = routing.get(username)
       if (!entry) return false
       if (settings.get().gateway.authMode === 'username-only') return true
-      const row = db.get<{ password_enc: string }>('SELECT password_enc FROM node_credentials WHERE node_id = ?', [entry.nodeId])
+      const row = db
+        .select({ password_enc: nodeCredentials.password_enc })
+        .from(nodeCredentials)
+        .where(eq(nodeCredentials.node_id, entry.nodeId))
+        .get()
       if (!row) return false
       try {
         return safeEqual(decryptSecret(row.password_enc), password)
@@ -193,7 +199,11 @@ async function main() {
     prePublishCheck: async (nodeIds) => {
       if (!nodeIds.length) return
       const targets = detector.loadTargets(nodeIds, true).filter((t) => {
-        const st = db.get<{ next_check_at: number | null }>('SELECT next_check_at FROM node_status WHERE node_id = ?', [t.nodeId])
+        const st = db
+          .select({ next_check_at: nodeStatus.next_check_at })
+          .from(nodeStatus)
+          .where(eq(nodeStatus.node_id, t.nodeId))
+          .get()
         return !st?.next_check_at || st.next_check_at <= Date.now()
       })
       if (targets.length) await detector.run(targets, { source: 'publish_gate', depth: 'lite' })
@@ -251,7 +261,7 @@ async function main() {
 
     const sqliteOk = (() => {
       try {
-        db.get('SELECT 1 AS x')
+        db.all(sql`SELECT 1`)
         return true
       } catch {
         return false
@@ -509,7 +519,17 @@ async function main() {
   scheduler.add('cleanup', { cron: '15 4 * * *' }, () => {
     detector.trimHistory()
     conns.trimHistory(7)
-    db.run("DELETE FROM xray_apply_ops WHERE at < ? AND id NOT IN (SELECT id FROM xray_apply_ops ORDER BY id DESC LIMIT 20000)", [Date.now() - 30 * 86400_000])
+    db.delete(xrayApplyOps)
+      .where(
+        and(
+          lt(xrayApplyOps.at, Date.now() - 30 * 86400_000),
+          notInArray(
+            xrayApplyOps.id,
+            db.select({ id: xrayApplyOps.id }).from(xrayApplyOps).orderBy(desc(xrayApplyOps.id)).limit(20000)
+          )
+        )
+      )
+      .run()
     logger.info('每日清理完成（apply ops 保留最近 30 天 / 20000 条）')
   })
   scheduler.add('maintenance-window', { everySec: 60 }, async () => {
@@ -556,7 +576,10 @@ async function main() {
 
 /** direct 模式的账号表（附录 A） */
 function directCredentials(db: Db): { username: string; password: string }[] {
-  const rows = db.all<{ username: string; password_enc: string }>('SELECT username, password_enc FROM node_credentials')
+  const rows = db
+    .select({ username: nodeCredentials.username, password_enc: nodeCredentials.password_enc })
+    .from(nodeCredentials)
+    .all()
   const out: { username: string; password: string }[] = []
   for (const r of rows) {
     try {
@@ -572,7 +595,11 @@ function directCredentials(db: Db): { username: string; password: string }[] {
 function rebuildRouting(settings: SettingsStore, db: Db, routing: RoutingTable, persist = true): void {
   const desired = buildDesiredNodes(db, settings, new PortPool(db, settings))
   const entries = desired.desired.map((d) => ({ nodeId: d.nodeId, username: d.username, port: d.inboundPort, tag: d.outboundTag }))
-  const aliases = db.all<{ alias: string; node_id: string }>('SELECT alias, node_id FROM node_aliases WHERE active = 1')
+  const aliases = db
+    .select({ alias: nodeAliases.alias, node_id: nodeAliases.node_id })
+    .from(nodeAliases)
+    .where(eq(nodeAliases.active, 1))
+    .all()
   for (const a of aliases) {
     const base = entries.find((e) => e.nodeId === a.node_id)
     if (base) entries.push({ ...base, username: a.alias })

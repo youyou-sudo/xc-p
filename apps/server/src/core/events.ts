@@ -1,4 +1,5 @@
 import type { Db } from './db'
+import { events } from './schema'
 
 export type EventLevel = 'info' | 'warn' | 'error'
 
@@ -35,10 +36,19 @@ export class EventBus {
   emit(e: Omit<AppEvent, 'at'> & { at?: number }): AppEvent {
     const ev: AppEvent = { ...e, at: e.at ?? Date.now() }
     try {
-      const r = this.db.run(
-        'INSERT INTO events (at, level, kind, node_id, subscription_id, revision_id, message, detail_json) VALUES (?,?,?,?,?,?,?,?)',
-        [ev.at, ev.level, ev.kind, ev.nodeId ?? null, ev.subscriptionId ?? null, ev.revisionId ?? null, ev.message, ev.detail === undefined ? null : JSON.stringify(ev.detail)],
-      )
+      const r = this.db
+        .insert(events)
+        .values({
+          at: ev.at,
+          level: ev.level,
+          kind: ev.kind,
+          node_id: ev.nodeId ?? null,
+          subscription_id: ev.subscriptionId ?? null,
+          revision_id: ev.revisionId ?? null,
+          message: ev.message,
+          detail_json: ev.detail === undefined ? null : JSON.stringify(ev.detail),
+        })
+        .run()
       ev.id = r.lastInsertRowid
     } catch {
       /* 事件落库失败不应中断业务 */

@@ -16,6 +16,7 @@
   "dependencies": {
     "@sinclair/typebox": "^0.34.52",
     "croner": "^10.0.1",
+    "drizzle-orm": "^0.45.4",
     "elysia": "^1.4.30",
     "yaml": "^2.9.1"
   },

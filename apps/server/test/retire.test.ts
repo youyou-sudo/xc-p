@@ -2,7 +2,9 @@ import { afterEach, describe, expect, test } from 'bun:test'
 import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { Db } from '../src/core/db'
+import { eq } from 'drizzle-orm'
+import { openDb, type Db } from '../src/core/db'
+import { pendingRetire } from '../src/core/schema'
 import { EventBus } from '../src/core/events'
 import { runMigrations } from '../src/core/migrations'
 import { SettingsStore } from '../src/core/settings'
@@ -26,7 +28,7 @@ afterEach(() => {
 
 function setup() {
   const dir = mkdtempSync(join(tmpdir(), 'xcp-retire-'))
-  const db = new Db(join(dir, 'sb.db'))
+  const db = openDb(join(dir, 'sb.db'))
   resources.push({ dir, db })
   runMigrations(db)
   const settings = new SettingsStore(db)
@@ -71,13 +73,17 @@ describe('RetireQueue 延迟退休', () => {
     retire.enqueue([{ kind: 'outbound', tag: 'out-a', nodeId: 'n1', revisionId: null }])
     // 重复入队应该被去重
     retire.enqueue([{ kind: 'outbound', tag: 'out-a', nodeId: 'n1', revisionId: null }])
-    expect(db.all('SELECT * FROM pending_retire').length).toBe(1)
+    expect(db.select().from(pendingRetire).all().length).toBe(1)
     expect(retire.pendingTags().has('out-a')).toBe(true)
 
     const now = Date.now()
     const done1 = await retire.processDue(now + 1_000)
     expect(done1).toBe(0)
-    const row1 = db.get<any>('SELECT done_at, error, retire_after FROM pending_retire WHERE tag = ?', ['out-a'])!
+    const row1 = db
+      .select({ done_at: pendingRetire.done_at, error: pendingRetire.error, retire_after: pendingRetire.retire_after })
+      .from(pendingRetire)
+      .where(eq(pendingRetire.tag, 'out-a'))
+      .get()!
     expect(row1.done_at).toBeNull()
     expect(String(row1.error)).toContain('connection refused')
     expect(row1.retire_after).toBeGreaterThan(now)
@@ -87,7 +93,7 @@ describe('RetireQueue 延迟退休', () => {
     state.stderr = ''
     const done2 = await retire.processDue(now + 120_000)
     expect(done2).toBe(1)
-    const row2 = db.get<any>('SELECT done_at FROM pending_retire WHERE tag = ?', ['out-a'])!
+    const row2 = db.select({ done_at: pendingRetire.done_at }).from(pendingRetire).where(eq(pendingRetire.tag, 'out-a')).get()!
     expect(row2.done_at).not.toBeNull()
     expect(retire.pendingTags().size).toBe(0)
   })

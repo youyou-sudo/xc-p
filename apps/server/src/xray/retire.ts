@@ -3,6 +3,8 @@ import { randomId } from '../core/ids'
 import type { EventBus } from '../core/events'
 import type { SettingsStore } from '../core/settings'
 import type { XrayCli } from './cli'
+import { and, asc, count, eq, inArray, isNull, lte } from 'drizzle-orm'
+import { pendingRetire, xrayApplyOps } from '../core/schema'
 
 export interface RetireItem {
   id: string
@@ -33,36 +35,56 @@ export class RetireQueue {
     for (const it of items) {
       if (!it.tag) continue
       // 同一个 tag 可能因为「对账 + 发布」重复进入删除计划，避免排队两次。
-      const existing = this.db.get<{ id: string }>(
-        'SELECT id FROM pending_retire WHERE kind = ? AND tag = ? AND done_at IS NULL LIMIT 1',
-        [it.kind, it.tag],
-      )
+      const existing = this.db
+        .select({ id: pendingRetire.id })
+        .from(pendingRetire)
+        .where(and(eq(pendingRetire.kind, it.kind), eq(pendingRetire.tag, it.tag), isNull(pendingRetire.done_at)))
+        .limit(1)
+        .get()
       if (existing) continue
-      this.db.run(
-        'INSERT INTO pending_retire (id, kind, tag, node_id, revision_id, retire_after, done_at, error) VALUES (?,?,?,?,?,?,NULL,NULL)',
-        [randomId('ret_'), it.kind, it.tag, it.nodeId ?? null, it.revisionId ?? null, now + delay],
-      )
+      this.db
+        .insert(pendingRetire)
+        .values({
+          id: randomId('ret_'),
+          kind: it.kind,
+          tag: it.tag,
+          node_id: it.nodeId ?? null,
+          revision_id: it.revisionId ?? null,
+          retire_after: now + delay,
+          done_at: null,
+          error: null,
+        })
+        .run()
     }
   }
 
   due(now = Date.now(), limit = 200): RetireItem[] {
-    return this.db.all<RetireItem>(
-      'SELECT * FROM pending_retire WHERE done_at IS NULL AND retire_after <= ? ORDER BY retire_after ASC LIMIT ?',
-      [now, limit],
-    )
+    return this.db
+      .select()
+      .from(pendingRetire)
+      .where(and(isNull(pendingRetire.done_at), lte(pendingRetire.retire_after, now)))
+      .orderBy(asc(pendingRetire.retire_after))
+      .limit(limit)
+      .all() as RetireItem[]
   }
 
   list(limit = 200): RetireItem[] {
-    return this.db.all<RetireItem>('SELECT * FROM pending_retire WHERE done_at IS NULL ORDER BY retire_after ASC LIMIT ?', [limit])
+    return this.db
+      .select()
+      .from(pendingRetire)
+      .where(isNull(pendingRetire.done_at))
+      .orderBy(asc(pendingRetire.retire_after))
+      .limit(limit)
+      .all() as RetireItem[]
   }
 
   count(): number {
-    return this.db.get<{ n: number }>('SELECT COUNT(*) AS n FROM pending_retire WHERE done_at IS NULL')?.n ?? 0
+    return this.db.select({ n: count() }).from(pendingRetire).where(isNull(pendingRetire.done_at)).get()?.n ?? 0
   }
 
   /** 已在队列里、尚未完成的 tag（对账时视为已知过渡态，不算漂移） */
   pendingTags(): Set<string> {
-    const rows = this.db.all<{ tag: string }>('SELECT tag FROM pending_retire WHERE done_at IS NULL')
+    const rows = this.db.select({ tag: pendingRetire.tag }).from(pendingRetire).where(isNull(pendingRetire.done_at)).all()
     return new Set(rows.map((r) => r.tag))
   }
 
@@ -98,19 +120,34 @@ export class RetireQueue {
       const tags = outbounds.map((i) => i.tag)
       const started = Date.now()
       const res = await this.cli.rmo(tags)
-      this.db.run(
-        'INSERT INTO xray_apply_ops (revision_id, at, op, tag, payload_json, ok, duration_ms, stdout, stderr, error_kind) VALUES (?,?,?,?,?,?,?,?,?,?)',
-        [outbounds[0]!.revision_id, started, 'rmo', tags.join(','), JSON.stringify(tags), res.ok ? 1 : 0, res.durationMs, res.stdout.slice(0, 4000), res.stderr.slice(0, 4000), res.errorKind ?? null],
-      )
+      this.db
+        .insert(xrayApplyOps)
+        .values({
+          revision_id: outbounds[0]!.revision_id,
+          at: started,
+          op: 'rmo',
+          tag: tags.join(','),
+          payload_json: JSON.stringify(tags),
+          ok: res.ok ? 1 : 0,
+          duration_ms: res.durationMs,
+          stdout: res.stdout.slice(0, 4000),
+          stderr: res.stderr.slice(0, 4000),
+          error_kind: res.errorKind ?? null,
+        })
+        .run()
       if (res.ok) {
         for (const it of outbounds) {
-          this.db.run('UPDATE pending_retire SET done_at = ?, error = NULL WHERE id = ?', [Date.now(), it.id])
+          this.db.update(pendingRetire).set({ done_at: Date.now(), error: null }).where(eq(pendingRetire.id, it.id)).run()
           done++
         }
       } else if (this.alreadyGone(res.stderr)) {
         // 数据面已经不存在这些 tag（例如外部重启/被手动清理），视为完成。
         for (const it of outbounds) {
-          this.db.run('UPDATE pending_retire SET done_at = ?, error = ? WHERE id = ?', [Date.now(), res.stderr.slice(0, 500), it.id])
+          this.db
+            .update(pendingRetire)
+            .set({ done_at: Date.now(), error: res.stderr.slice(0, 500) })
+            .where(eq(pendingRetire.id, it.id))
+            .run()
           done++
         }
       } else {
@@ -121,19 +158,19 @@ export class RetireQueue {
         const gone = present ? outbounds.filter((it) => !present.has(it.tag)) : []
         const remaining = present ? outbounds.filter((it) => present.has(it.tag)) : outbounds
         for (const it of gone) {
-          this.db.run('UPDATE pending_retire SET done_at = ?, error = ? WHERE id = ?', [
-            Date.now(),
-            'rmo 时 tag 已不在数据面（视为已完成）',
-            it.id,
-          ])
+          this.db
+            .update(pendingRetire)
+            .set({ done_at: Date.now(), error: 'rmo 时 tag 已不在数据面（视为已完成）' })
+            .where(eq(pendingRetire.id, it.id))
+            .run()
           done++
         }
         for (const it of remaining) {
-          this.db.run('UPDATE pending_retire SET error = ?, retire_after = ? WHERE id = ?', [
-            res.stderr.slice(0, 500),
-            Date.now() + RETRY_MS,
-            it.id,
-          ])
+          this.db
+            .update(pendingRetire)
+            .set({ error: res.stderr.slice(0, 500), retire_after: Date.now() + RETRY_MS })
+            .where(eq(pendingRetire.id, it.id))
+            .run()
         }
         if (remaining.length > 0) {
           this.events.warn('xray.retire_retry', `延迟退休 rmo 失败，60 秒后重试：${res.stderr.slice(0, 200)}`, {
@@ -145,10 +182,18 @@ export class RetireQueue {
     for (const it of others) {
       const res = it.kind === 'inbound' ? await this.cli.rmi([it.tag]) : await this.cli.rmrules([it.tag])
       if (res.ok || this.alreadyGone(res.stderr)) {
-        this.db.run('UPDATE pending_retire SET done_at = ?, error = ? WHERE id = ?', [Date.now(), res.ok ? null : res.stderr.slice(0, 500), it.id])
+        this.db
+          .update(pendingRetire)
+          .set({ done_at: Date.now(), error: res.ok ? null : res.stderr.slice(0, 500) })
+          .where(eq(pendingRetire.id, it.id))
+          .run()
         done++
       } else {
-        this.db.run('UPDATE pending_retire SET error = ?, retire_after = ? WHERE id = ?', [res.stderr.slice(0, 500), Date.now() + RETRY_MS, it.id])
+        this.db
+          .update(pendingRetire)
+          .set({ error: res.stderr.slice(0, 500), retire_after: Date.now() + RETRY_MS })
+          .where(eq(pendingRetire.id, it.id))
+          .run()
       }
     }
     return done
@@ -156,9 +201,11 @@ export class RetireQueue {
 
   /** all-time ado+rmo 计数（D5：热操作泄漏阈值） */
   hotOpsTotal(): number {
-    const row = this.db.get<{ n: number }>(
-      "SELECT COUNT(*) AS n FROM xray_apply_ops WHERE op IN ('ado','rmo') AND ok = 1",
-    )
+    const row = this.db
+      .select({ n: count() })
+      .from(xrayApplyOps)
+      .where(and(inArray(xrayApplyOps.op, ['ado', 'rmo']), eq(xrayApplyOps.ok, 1)))
+      .get()
     return row?.n ?? 0
   }
 }

@@ -1,6 +1,16 @@
+import { and, asc, count, eq, isNotNull, like, or, sql } from 'drizzle-orm'
 import type { AppContext } from '../../context'
 import { AppError } from '../../core/errors'
 import { parseBool } from '../../core/http'
+import {
+  appliedNodes,
+  nodeAliases,
+  nodeCheckRuns,
+  nodeCredentials,
+  nodeSources,
+  nodeStatus,
+  nodes as nodesT,
+} from '../../core/schema'
 
 /** 生成客户端连接串（PANEL.md §10.2 / §11.1 /api/nodes/:id/connection）。 */
 export function connectionStrings(username: string, password: string, host: string, port: number) {
@@ -27,50 +37,75 @@ export function connectionStrings(username: string, password: string, host: stri
 /** 节点列表查询（/api/nodes 与 /v1/nodes 共用）。 */
 export function listNodes(ctx: AppContext, q: Record<string, string | undefined>, limit: number, offset: number, withCredentials = true) {
   const { db } = ctx
-  const where: string[] = []
-  const params: any[] = []
-  if (q.state) {
-    where.push("COALESCE(st.state,'unknown') = ?")
-    params.push(q.state)
-  }
-  if (q.protocol) {
-    where.push('n.protocol = ?')
-    params.push(q.protocol)
-  }
-  if (q.country) {
-    where.push("UPPER(COALESCE(n.country_code, '')) = ?")
-    params.push(q.country.toUpperCase())
-  }
-  if (q.enabled !== undefined) {
-    where.push('n.enabled = ?')
-    params.push(parseBool(q.enabled) ? 1 : 0)
-  }
-  if (q.supported !== undefined) {
-    where.push('n.protocol_supported = ?')
-    params.push(parseBool(q.supported) ? 1 : 0)
-  }
-  if (q.missing === 'true') where.push('n.missing_since IS NOT NULL')
+  const conds = []
+  if (q.state) conds.push(sql`COALESCE(${nodeStatus.state}, 'unknown') = ${q.state}`)
+  if (q.protocol) conds.push(eq(nodesT.protocol, q.protocol))
+  if (q.country) conds.push(sql`UPPER(COALESCE(${nodesT.country_code}, '')) = ${q.country.toUpperCase()}`)
+  if (q.enabled !== undefined) conds.push(eq(nodesT.enabled, parseBool(q.enabled) ? 1 : 0))
+  if (q.supported !== undefined) conds.push(eq(nodesT.protocol_supported, parseBool(q.supported) ? 1 : 0))
+  if (q.missing === 'true') conds.push(isNotNull(nodesT.missing_since))
   if (q.q) {
-    where.push('(n.id LIKE ? OR n.display_name LIKE ? OR n.protocol LIKE ?)')
-    params.push('%' + q.q + '%', '%' + q.q + '%', '%' + q.q + '%')
+    const needle = '%' + q.q + '%'
+    conds.push(
+      or(like(nodesT.id, needle), like(nodesT.display_name, needle), like(nodesT.protocol, needle))!
+    )
   }
-  const clause = where.length ? ' WHERE ' + where.join(' AND ') : ''
-  const total = db.get<{ n: number }>('SELECT COUNT(*) AS n FROM nodes n LEFT JOIN node_status st ON st.node_id = n.id' + clause, params)?.n ?? 0
-  const order = q.sort === 'latency' ? 'st.delay_ms ASC' : q.sort === 'state' ? 'st.state ASC' : 'n.id ASC'
-  const rows = db.all<any>(
-    'SELECT n.id, n.display_name, n.country_code, n.region, n.protocol, n.protocol_supported, n.enabled, n.publish_error, n.params_hash, ' +
-      'n.first_seen_at, n.last_seen_at, n.missing_since, n.stale_until, n.check_depth, ' +
-      'st.state, st.last_check_at, st.connect_ms, st.total_ms, st.delay_ms, st.exit_ip, st.exit_country, st.exit_region, st.exit_asn, ' +
-      'st.error_kind, st.error_msg, st.fail_streak, st.success_streak, st.recovered_at, st.next_check_at, st.checks_total, st.checks_ok, st.uptime_24h ' +
-      'FROM nodes n LEFT JOIN node_status st ON st.node_id = n.id' +
-      clause +
-      ' ORDER BY ' +
-      order +
-      ' LIMIT ? OFFSET ?',
-    [...params, limit, offset],
-  )
+  const where = conds.length ? and(...conds) : undefined
+  const total =
+    db
+      .select({ n: count() })
+      .from(nodesT)
+      .leftJoin(nodeStatus, eq(nodeStatus.node_id, nodesT.id))
+      .where(where)
+      .get()?.n ?? 0
+  const orderBy = q.sort === 'latency' ? asc(nodeStatus.delay_ms) : q.sort === 'state' ? asc(nodeStatus.state) : asc(nodesT.id)
+  const rows = db
+    .select({
+      id: nodesT.id,
+      display_name: nodesT.display_name,
+      country_code: nodesT.country_code,
+      region: nodesT.region,
+      protocol: nodesT.protocol,
+      protocol_supported: nodesT.protocol_supported,
+      enabled: nodesT.enabled,
+      publish_error: nodesT.publish_error,
+      first_seen_at: nodesT.first_seen_at,
+      last_seen_at: nodesT.last_seen_at,
+      missing_since: nodesT.missing_since,
+      stale_until: nodesT.stale_until,
+      check_depth: nodesT.check_depth,
+      state: nodeStatus.state,
+      last_check_at: nodeStatus.last_check_at,
+      connect_ms: nodeStatus.connect_ms,
+      total_ms: nodeStatus.total_ms,
+      delay_ms: nodeStatus.delay_ms,
+      exit_ip: nodeStatus.exit_ip,
+      exit_country: nodeStatus.exit_country,
+      exit_region: nodeStatus.exit_region,
+      exit_asn: nodeStatus.exit_asn,
+      error_kind: nodeStatus.error_kind,
+      error_msg: nodeStatus.error_msg,
+      fail_streak: nodeStatus.fail_streak,
+      success_streak: nodeStatus.success_streak,
+      recovered_at: nodeStatus.recovered_at,
+      next_check_at: nodeStatus.next_check_at,
+      checks_total: nodeStatus.checks_total,
+      checks_ok: nodeStatus.checks_ok,
+      uptime_24h: nodeStatus.uptime_24h,
+    })
+    .from(nodesT)
+    .leftJoin(nodeStatus, eq(nodeStatus.node_id, nodesT.id))
+    .where(where)
+    .orderBy(orderBy)
+    .limit(limit)
+    .offset(offset)
+    .all()
   const items = rows.map((r) => {
-    const sources = db.all<{ subscription_id: string; name_in_sub: string }>('SELECT subscription_id, name_in_sub FROM node_sources WHERE node_id = ?', [r.id])
+    const sources = db
+      .select({ subscription_id: nodeSources.subscription_id, name_in_sub: nodeSources.name_in_sub })
+      .from(nodeSources)
+      .where(eq(nodeSources.node_id, r.id))
+      .all()
     const base: any = {
       id: r.id,
       displayName: r.display_name,
@@ -107,7 +142,11 @@ export function listNodes(ctx: AppContext, q: Record<string, string | undefined>
       },
     }
     if (withCredentials) {
-      const cred = db.get<{ username: string }>('SELECT username FROM node_credentials WHERE node_id = ?', [r.id])
+      const cred = db
+        .select({ username: nodeCredentials.username })
+        .from(nodeCredentials)
+        .where(eq(nodeCredentials.node_id, r.id))
+        .get()
       base.username = cred?.username ?? r.id
     }
     return base
@@ -122,22 +161,26 @@ export function listNodes(ctx: AppContext, q: Record<string, string | undefined>
  */
 export function createNodesService(ctx: AppContext) {
   const purgeNodeRow = (nodeId: string): { found: boolean; applied: boolean; closed: number } => {
-    const existing = ctx.db.get<{ id: string; enabled: number; missing_since: number | null }>('SELECT id, enabled, missing_since FROM nodes WHERE id = ?', [nodeId])
+    const existing = ctx.db
+      .select({ id: nodesT.id, enabled: nodesT.enabled, missing_since: nodesT.missing_since })
+      .from(nodesT)
+      .where(eq(nodesT.id, nodeId))
+      .get()
     if (!existing) return { found: false, applied: false, closed: 0 }
     if (existing.enabled && existing.missing_since === null) {
       throw new AppError('conflict', '节点仍在启用中：请先停用（并发布）后再删除，避免误删正在使用的入站', 409)
     }
-    const hasApplied = !!ctx.db.get<{ node_id: string }>('SELECT node_id FROM applied_nodes WHERE node_id = ?', [nodeId])
+    const hasApplied = !!ctx.db.select({ node_id: appliedNodes.node_id }).from(appliedNodes).where(eq(appliedNodes.node_id, nodeId)).get()
     const closed = ctx.kick({ nodeId })
     ctx.routing.delete(nodeId)
     ctx.routing.persist()
     ctx.ports.release(nodeId)
-    ctx.db.run('DELETE FROM nodes WHERE id = ?', [nodeId])
-    ctx.db.run('DELETE FROM node_credentials WHERE node_id = ?', [nodeId])
-    ctx.db.run('DELETE FROM node_sources WHERE node_id = ?', [nodeId])
-    ctx.db.run('DELETE FROM node_status WHERE node_id = ?', [nodeId])
-    ctx.db.run('DELETE FROM node_check_runs WHERE node_id = ?', [nodeId])
-    ctx.db.run('DELETE FROM node_aliases WHERE node_id = ? OR alias = ?', [nodeId, nodeId])
+    ctx.db.delete(nodesT).where(eq(nodesT.id, nodeId)).run()
+    ctx.db.delete(nodeCredentials).where(eq(nodeCredentials.node_id, nodeId)).run()
+    ctx.db.delete(nodeSources).where(eq(nodeSources.node_id, nodeId)).run()
+    ctx.db.delete(nodeStatus).where(eq(nodeStatus.node_id, nodeId)).run()
+    ctx.db.delete(nodeCheckRuns).where(eq(nodeCheckRuns.node_id, nodeId)).run()
+    ctx.db.delete(nodeAliases).where(or(eq(nodeAliases.node_id, nodeId), eq(nodeAliases.alias, nodeId))).run()
     return { found: true, applied: hasApplied, closed }
   }
   return { purgeNodeRow }

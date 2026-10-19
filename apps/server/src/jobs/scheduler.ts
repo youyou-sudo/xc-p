@@ -1,4 +1,6 @@
 import { Cron } from 'croner'
+import { and, eq, isNotNull, lte } from 'drizzle-orm'
+import { nodes } from '../core/schema'
 import type { Db } from '../core/db'
 import type { EventBus } from '../core/events'
 import type { SettingsStore } from '../core/settings'
@@ -85,7 +87,18 @@ export function staleExpiryTask(db: Db, settings: SettingsStore, events: EventBu
   return () => {
     if (!settings.get().publish.autoRemoveStale) return 0
     const now = Date.now()
-    const r = db.run('UPDATE nodes SET enabled = 0, updated_at = ? WHERE enabled = 1 AND missing_since IS NOT NULL AND stale_until IS NOT NULL AND stale_until <= ?', [now, now])
+    const r = db
+      .update(nodes)
+      .set({ enabled: 0, updated_at: now })
+      .where(
+        and(
+          eq(nodes.enabled, 1),
+          isNotNull(nodes.missing_since),
+          isNotNull(nodes.stale_until),
+          lte(nodes.stale_until, now)
+        )
+      )
+      .run()
     if (r.changes > 0) events.warn('node.stale_expired', r.changes + ' 个节点超过 stale 保留期，已置 enabled=0（下次发布从数据面移除）')
     return r.changes
   }

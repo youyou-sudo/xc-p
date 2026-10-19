@@ -1,6 +1,8 @@
 import type { Db } from '../core/db'
 import { AppError } from '../core/errors'
 import type { SettingsStore } from '../core/settings'
+import { and, count, eq, gt, isNotNull, isNull, lte, or } from 'drizzle-orm'
+import { nodePort } from '../core/schema'
 
 export interface PortPoolStats { pool: number; used: number; cooling: number; start: number; end: number }
 
@@ -21,28 +23,35 @@ export class PortPool {
 
   /** 把冷却到期的行清掉，使其端口重新可用 */
   reap(now = Date.now()): number {
-    const r = this.db.run('DELETE FROM node_port WHERE released_at IS NOT NULL AND reusable_at IS NOT NULL AND reusable_at <= ?', [now])
+    const r = this.db
+      .delete(nodePort)
+      .where(and(isNotNull(nodePort.released_at), isNotNull(nodePort.reusable_at), lte(nodePort.reusable_at, now)))
+      .run()
     return r.changes
   }
 
   portOf(nodeId: string): number | undefined {
-    const row = this.db.get<PortRow>('SELECT * FROM node_port WHERE node_id = ?', [nodeId])
+    const row: PortRow | undefined = this.db.select().from(nodePort).where(eq(nodePort.node_id, nodeId)).get()
     return row && row.released_at === null ? row.port : undefined
   }
 
   /** 幂等：已有则返回，否则分配最小可用端口 */
   ensure(nodeId: string, now = Date.now()): number {
     this.reap(now)
-    const existing = this.db.get<PortRow>('SELECT * FROM node_port WHERE node_id = ?', [nodeId])
+    const existing: PortRow | undefined = this.db.select().from(nodePort).where(eq(nodePort.node_id, nodeId)).get()
     if (existing && existing.released_at === null) return existing.port
     const { start, end } = this.range()
-    const taken = new Set(this.db.all<{ port: number }>('SELECT port FROM node_port').map((r) => r.port))
+    const taken = new Set(this.db.select({ port: nodePort.port }).from(nodePort).all().map((r) => r.port))
     for (let p = start; p <= end; p++) {
       if (!taken.has(p)) {
         if (existing) {
-          this.db.run('UPDATE node_port SET port = ?, assigned_at = ?, released_at = NULL, reusable_at = NULL WHERE node_id = ?', [p, now, nodeId])
+          this.db
+            .update(nodePort)
+            .set({ port: p, assigned_at: now, released_at: null, reusable_at: null })
+            .where(eq(nodePort.node_id, nodeId))
+            .run()
         } else {
-          this.db.run('INSERT INTO node_port (node_id, port, assigned_at) VALUES (?,?,?)', [nodeId, p, now])
+          this.db.insert(nodePort).values({ node_id: nodeId, port: p, assigned_at: now }).run()
         }
         return p
       }
@@ -53,22 +62,27 @@ export class PortPool {
   /** 释放：不立刻回收，进入冷却（D3） */
   release(nodeId: string, now = Date.now()): void {
     const cooldownSec = this.settings.get().xray.portCooldownSec
-    this.db.run('UPDATE node_port SET released_at = ?, reusable_at = ? WHERE node_id = ? AND released_at IS NULL', [
-      now,
-      now + cooldownSec * 1000,
-      nodeId,
-    ])
+    this.db
+      .update(nodePort)
+      .set({ released_at: now, reusable_at: now + cooldownSec * 1000 })
+      .where(and(eq(nodePort.node_id, nodeId), isNull(nodePort.released_at)))
+      .run()
   }
 
   /** 立即彻底删除（端口池重建/回滚时使用） */
   forget(nodeId: string): void {
-    this.db.run('DELETE FROM node_port WHERE node_id = ?', [nodeId])
+    this.db.delete(nodePort).where(eq(nodePort.node_id, nodeId)).run()
   }
 
   stats(now = Date.now()): PortPoolStats {
     const { start, end } = this.range()
-    const used = this.db.get<{ n: number }>('SELECT COUNT(*) AS n FROM node_port WHERE released_at IS NULL')?.n ?? 0
-    const cooling = this.db.get<{ n: number }>('SELECT COUNT(*) AS n FROM node_port WHERE released_at IS NOT NULL AND (reusable_at IS NULL OR reusable_at > ?)', [now])?.n ?? 0
+    const used = this.db.select({ n: count() }).from(nodePort).where(isNull(nodePort.released_at)).get()?.n ?? 0
+    const cooling =
+      this.db
+        .select({ n: count() })
+        .from(nodePort)
+        .where(and(isNotNull(nodePort.released_at), or(isNull(nodePort.reusable_at), gt(nodePort.reusable_at, now))))
+        .get()?.n ?? 0
     return { pool: end - start + 1, used, cooling, start, end }
   }
 
@@ -79,7 +93,7 @@ export class PortPool {
    */
   async probeBindable(count = 8): Promise<{ port: number; ok: boolean }[]> {
     const { start, end } = this.range()
-    const reserved = new Set(this.db.all<{ port: number }>('SELECT port FROM node_port').map((r) => r.port))
+    const reserved = new Set(this.db.select({ port: nodePort.port }).from(nodePort).all().map((r) => r.port))
     const out: { port: number; ok: boolean }[] = []
     for (let port = start; port <= end && out.length < count; port++) {
       if (reserved.has(port)) continue

@@ -1,5 +1,7 @@
+import { eq } from 'drizzle-orm'
 import type { Db } from './db'
 import { validationFailed } from './errors'
+import { settings as settingsTable } from './schema'
 
 /** PANEL.md §6.7 settings 默认形态（面板可视化编辑，唯一配置入口，D8） */
 export interface Settings {
@@ -244,7 +246,11 @@ export class SettingsStore {
   }
 
   private load(): Settings {
-    const row = this.db.get<{ value_json: string }>('SELECT value_json FROM settings WHERE key = ?', ['root'])
+    const row = this.db
+      .select({ value_json: settingsTable.value_json })
+      .from(settingsTable)
+      .where(eq(settingsTable.key, 'root'))
+      .get()
     let stored: Partial<Settings> = {}
     if (row) {
       try {
@@ -263,10 +269,13 @@ export class SettingsStore {
   }
 
   private persist(value: Settings): void {
-    this.db.run(
-      'INSERT INTO settings (key, value_json, updated_at) VALUES (?, ?, ?) ON CONFLICT(key) DO UPDATE SET value_json = excluded.value_json, updated_at = excluded.updated_at',
-      ['root', JSON.stringify(value), Date.now()],
-    )
+    const now = Date.now()
+    const json = JSON.stringify(value)
+    this.db
+      .insert(settingsTable)
+      .values({ key: 'root', value_json: json, updated_at: now })
+      .onConflictDoUpdate({ target: settingsTable.key, set: { value_json: json, updated_at: now } })
+      .run()
   }
 
   get(): Settings {

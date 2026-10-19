@@ -8,9 +8,11 @@
  *
  * 说明：口令只以 argon2id 哈希入库；重置后会吊销全部现有会话。
  */
-import { Database } from 'bun:sqlite'
 import { join, resolve } from 'node:path'
 import { existsSync } from 'node:fs'
+import { eq, isNull } from 'drizzle-orm'
+import { openDb } from '../apps/server/src/core/db'
+import { admin, sessions } from '../apps/server/src/core/schema'
 
 const dataDir = resolve(process.env.DATA_DIR || join(process.cwd(), 'data'))
 const dbFile = join(dataDir, 'sb.db')
@@ -37,17 +39,17 @@ if (!existsSync(dbFile)) {
   process.exit(2)
 }
 
-const db = new Database(dbFile)
+const db = openDb(dbFile)
 try {
   const hash = await Bun.password.hash(password, { algorithm: 'argon2id', memoryCost: 19456, timeCost: 2 })
-  const existing = db.query('SELECT id, username FROM admin LIMIT 1').get() as { id: number; username: string } | null
+  const existing = db.select({ id: admin.id, username: admin.username }).from(admin).limit(1).get()
   const name = username || existing?.username || 'admin'
   if (existing) {
-    db.run('UPDATE admin SET username = ?, password_hash = ?, updated_at = ? WHERE id = ?', [name, hash, Date.now(), existing.id])
+    db.update(admin).set({ username: name, password_hash: hash, updated_at: Date.now() }).where(eq(admin.id, existing.id)).run()
   } else {
-    db.run('INSERT INTO admin (id, username, password_hash, updated_at) VALUES (1, ?, ?, ?)', [name, hash, Date.now()])
+    db.insert(admin).values({ id: 1, username: name, password_hash: hash, updated_at: Date.now() }).run()
   }
-  const revoked = db.run('UPDATE sessions SET revoked_at = ? WHERE revoked_at IS NULL', [Date.now()])
+  const revoked = db.update(sessions).set({ revoked_at: Date.now() }).where(isNull(sessions.revoked_at)).run()
   console.log('已重置管理员口令')
   console.log('  数据库：' + dbFile)
   console.log('  用户名：' + name)

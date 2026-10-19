@@ -1,93 +1,51 @@
-import { Database, type Statement } from 'bun:sqlite'
-import { logger } from './log'
-
-export type SqlValue = string | number | bigint | boolean | null | Uint8Array
-export type Row = Record<string, any>
+import { Database } from 'bun:sqlite'
+import type { BaseSQLiteDatabase } from 'drizzle-orm/sqlite-core'
+import { drizzle } from 'drizzle-orm/bun-sqlite'
+import { schema } from './schema'
 
 /**
- * bun:sqlite 是同步 API。Bun 单线程 + 同步事务已经天然串行，
- * 但控制面里有 await（网络、子进程），所以用一条 Promise 链把「写事务」串起来，
- * 保证 WAL 下不会出现交叉写（PANEL.md R13 / §6 开头）。
+ * bun:sqlite 的 write 语句运行时返回 { changes, lastInsertRowid }，但 drizzle 把
+ * BunSQLiteDatabase 的 TRunResult 类型参数写成了 void，导致 .run() 在类型上「没有返回值」。
+ * 这里按运行时的真实形状补回，openDb 里只有一处类型收口。
  */
-export class Db {
-  readonly raw: Database
-  private writeChain: Promise<unknown> = Promise.resolve()
+export interface RunResult {
+  changes: number
+  lastInsertRowid: number
+}
 
-  constructor(file: string, opts: { readonly?: boolean } = {}) {
-    this.raw = new Database(file, { create: !opts.readonly, readonly: !!opts.readonly })
-    this.raw.exec('PRAGMA journal_mode = WAL;')
-    this.raw.exec('PRAGMA synchronous = NORMAL;')
-    this.raw.exec('PRAGMA busy_timeout = 5000;')
-    this.raw.exec('PRAGMA foreign_keys = ON;')
+/**
+ * 打开 SQLite 连接。查询层全部走 drizzle 查询构造器（同步驱动，直接返回值，不用 await）；
+ * 少数 DDL 场景用 exec()，逃生口用 db.run(sql.raw(...))（注意：只能单条语句）。
+ *
+ * 事务用 drizzle 自带的 db.transaction(fn, { behavior: 'immediate' })——
+ * bun-sqlite 驱动是同步的，IMMEDIATE 语义与原先手写的 BEGIN IMMEDIATE 一致。
+ */
+export type Db = BaseSQLiteDatabase<'sync', RunResult, typeof schema> & {
+  /** 底层连接：用于 PRAGMA、BEGIN/COMMIT 等 drizzle 没覆盖的场景 */
+  raw: Database
+  /** 执行 DDL / PRAGMA（可多语句，drizzle 的 run() 只执行第一条） */
+  exec(sql: string): void
+  close(): void
+}
+
+export function openDb(file: string, opts: { readonly?: boolean } = {}): Db {
+  const raw = new Database(file, { create: !opts.readonly, readonly: !!opts.readonly })
+  raw.exec('PRAGMA journal_mode = WAL;')
+  raw.exec('PRAGMA synchronous = NORMAL;')
+  raw.exec('PRAGMA busy_timeout = 5000;')
+  raw.exec('PRAGMA foreign_keys = ON;')
+
+  const db = drizzle({ client: raw, schema }) as unknown as Db
+  db.raw = raw
+  db.exec = (ddl: string) => {
+    raw.exec(ddl)
   }
-
-  exec(sql: string): void {
-    this.raw.exec(sql)
-  }
-
-  get<T = Row>(sql: string, params: SqlValue[] | Record<string, SqlValue> = []): T | undefined {
-    const stmt = this.prepare(sql)
-    return (stmt.get(params as any) as T | undefined) ?? undefined
-  }
-
-  all<T = Row>(sql: string, params: SqlValue[] | Record<string, SqlValue> = []): T[] {
-    const stmt = this.prepare(sql)
-    return stmt.all(params as any) as T[]
-  }
-
-  run(sql: string, params: SqlValue[] | Record<string, SqlValue> = []): { changes: number; lastInsertRowid: number } {
-    const stmt = this.prepare(sql)
-    const r = stmt.run(params as any)
-    return { changes: Number(r.changes), lastInsertRowid: Number(r.lastInsertRowid) }
-  }
-
-  private prepare(sql: string): Statement {
-    return this.raw.query(sql)
-  }
-
-  /** 同步事务（IMMEDIATE），异常自动回滚 */
-  tx<T>(fn: () => T): T {
-    this.raw.exec('BEGIN IMMEDIATE')
+  db.close = () => {
     try {
-      const out = fn()
-      this.raw.exec('COMMIT')
-      return out
-    } catch (e) {
-      try {
-        this.raw.exec('ROLLBACK')
-      } catch (re) {
-        logger.error('rollback failed', String(re))
-      }
-      throw e
-    }
-  }
-
-  /** 异步写事务：进入单写队列（跨 await 也串行） */
-  async write<T>(fn: () => T | Promise<T>): Promise<T> {
-    const task = this.writeChain.then(async () => {
-      this.raw.exec('BEGIN IMMEDIATE')
-      try {
-        const out = await fn()
-        this.raw.exec('COMMIT')
-        return out
-      } catch (e) {
-        try {
-          this.raw.exec('ROLLBACK')
-        } catch (re) {
-          logger.error('rollback failed', String(re))
-        }
-        throw e
-      }
-    })
-    this.writeChain = task.catch(() => undefined)
-    return task
-  }
-
-  close(): void {
-    try {
-      this.raw.close()
+      raw.close()
     } catch {
       /* ignore */
     }
   }
+  return db
 }

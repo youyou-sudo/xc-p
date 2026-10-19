@@ -27,12 +27,18 @@
     "verify:web": "bun run scripts/verify/web-e2e.ts",
     "verify:api": "bun run scripts/verify/smoke-api.ts",
     "admin:password": "bun run scripts/admin-password.ts",
+    "db:generate": "bun run scripts/db-generate.ts",
     "xray:fetch": "bun run scripts/build-exe.ts --fetch-only",
     "build:exe": "bun run scripts/build-exe.ts"
   },
   "devDependencies": {
+    "@libsql/client": "^0.18.0",
     "bun-types": "latest",
+    "drizzle-kit": "^0.31.11",
     "playwright": "1.63.0",
     "typescript": "^7.0.2"
+  },
+  "dependencies": {
+    "drizzle-orm": "^0.45.4"
   }
 }

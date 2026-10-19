@@ -11,6 +11,8 @@ import type { XrayCli, XrayApiResult } from './cli'
 } from './render'
 import type { AppliedNode, ApplyPlan, DesiredNode } from './plan'
 import type { RetireQueue } from './retire'
+import { eq } from 'drizzle-orm'
+import { appliedNodes, nodes, revisionNodes, xrayApplyOps } from '../core/schema'
 
 export interface ApplyOpRecord {
   op: 'ado' | 'rmo' | 'adi' | 'rmi' | 'adrules' | 'rmrules' | 'replay'
@@ -56,10 +58,21 @@ export class ApplyEngine {
   }
 
   private record(revisionId: string | null, rec: ApplyOpRecord, payload?: unknown): void {
-    this.deps.db.run(
-      "INSERT INTO xray_apply_ops (revision_id, at, op, tag, payload_json, ok, duration_ms, stdout, stderr, error_kind) VALUES (?,?,?,?,?,?,?,?,?,?)",
-      [revisionId, Date.now(), rec.op, rec.tag, payload === undefined ? null : JSON.stringify(payload), rec.ok ? 1 : 0, rec.durationMs, rec.stdout?.slice(0, 4000) ?? null, rec.stderr?.slice(0, 4000) ?? null, rec.errorKind ?? null],
-    )
+    this.deps.db
+      .insert(xrayApplyOps)
+      .values({
+        revision_id: revisionId,
+        at: Date.now(),
+        op: rec.op,
+        tag: rec.tag,
+        payload_json: payload === undefined ? null : JSON.stringify(payload),
+        ok: rec.ok ? 1 : 0,
+        duration_ms: rec.durationMs,
+        stdout: rec.stdout?.slice(0, 4000) ?? null,
+        stderr: rec.stderr?.slice(0, 4000) ?? null,
+        error_kind: rec.errorKind ?? null,
+      })
+      .run()
   }
 
   private toRecord(op: ApplyOpRecord['op'], tag: string, res: XrayApiResult): ApplyOpRecord {
@@ -67,18 +80,36 @@ export class ApplyEngine {
   }
 
   private upsertApplied(node: DesiredNode, now = Date.now()): void {
-    this.deps.db.run(
-      `INSERT INTO applied_nodes (node_id, outbound_tag, inbound_tag, rule_tag, port, outbound_json, content_hash, applied_at)
-       VALUES (?,?,?,?,?,?,?,?)
-       ON CONFLICT(node_id) DO UPDATE SET outbound_tag=excluded.outbound_tag, inbound_tag=excluded.inbound_tag,
-         rule_tag=excluded.rule_tag, port=excluded.port, outbound_json=excluded.outbound_json,
-         content_hash=excluded.content_hash, applied_at=excluded.applied_at`,
-      [node.nodeId, node.outboundTag, node.inboundTag, node.ruleTag, node.inboundPort, JSON.stringify(node.outbound), node.contentHash, now],
-    )
+    const values = {
+      node_id: node.nodeId,
+      outbound_tag: node.outboundTag,
+      inbound_tag: node.inboundTag,
+      rule_tag: node.ruleTag,
+      port: node.inboundPort,
+      outbound_json: JSON.stringify(node.outbound),
+      content_hash: node.contentHash,
+      applied_at: now,
+    }
+    this.deps.db
+      .insert(appliedNodes)
+      .values(values)
+      .onConflictDoUpdate({
+        target: appliedNodes.node_id,
+        set: {
+          outbound_tag: values.outbound_tag,
+          inbound_tag: values.inbound_tag,
+          rule_tag: values.rule_tag,
+          port: values.port,
+          outbound_json: values.outbound_json,
+          content_hash: values.content_hash,
+          applied_at: values.applied_at,
+        },
+      })
+      .run()
   }
 
   private dropApplied(nodeId: string): void {
-    this.deps.db.run('DELETE FROM applied_nodes WHERE node_id = ?', [nodeId])
+    this.deps.db.delete(appliedNodes).where(eq(appliedNodes.node_id, nodeId)).run()
   }
 
   async applyPlan(plan: ApplyPlan, revisionId: string | null): Promise<ApplyResult> {
@@ -134,7 +165,7 @@ export class ApplyEngine {
       } catch (e) {
         const msg = e instanceof Error ? e.message : String(e)
         this.deps.events.error('xray.build_failed', `节点 ${node.nodeId} 构建校验失败：${msg}`, { nodeId: node.nodeId, revisionId })
-        this.deps.db.run('UPDATE nodes SET publish_error = ?, updated_at = ? WHERE id = ?', [msg, Date.now(), node.nodeId])
+        this.deps.db.update(nodes).set({ publish_error: msg, updated_at: Date.now() }).where(eq(nodes.id, node.nodeId)).run()
       }
     }
 
@@ -289,7 +320,7 @@ export class ApplyEngine {
         for (const r of group) {
           if (r.nodeId && pureRemoveNodeIds.has(r.nodeId)) {
             this.dropApplied(r.nodeId)
-            this.deps.db.run('DELETE FROM revision_nodes WHERE node_id = ?', [r.nodeId])
+            this.deps.db.delete(revisionNodes).where(eq(revisionNodes.node_id, r.nodeId)).run()
           }
         }
       }
@@ -317,7 +348,7 @@ export class ApplyEngine {
   }
  
   loadedApplied(): AppliedNode[] {
-    return this.deps.db.all<any>('SELECT * FROM applied_nodes').map((r) => ({
+    return this.deps.db.select().from(appliedNodes).all().map((r) => ({
       nodeId: r.node_id,
       outboundTag: r.outbound_tag,
       inboundTag: r.inbound_tag,

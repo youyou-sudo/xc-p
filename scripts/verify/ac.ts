@@ -25,7 +25,7 @@ import {
   xrayApiTags,
   type Api,
 } from './harness'
-import { Db } from '../../apps/server/src/core/db'
+import { openDb } from '../../apps/server/src/core/db'
 import { SettingsStore } from '../../apps/server/src/core/settings'
 import { PortPool } from '../../apps/server/src/xray/ports'
 
@@ -727,7 +727,7 @@ export async function runAcceptance(): Promise<CheckResult[]> {
     // ============================================================ AC-17 端口池
     await check('AC-17', '端口池：2000 次分配无失败、冷却期端口不复用、耗尽时中止并告警', async () => {
       const dir = await mkdtemp(join(tmpdir(), 'xcp-ports-'))
-      const db = new Db(join(dir, 'p.db'))
+      const db = openDb(join(dir, 'p.db'))
       db.exec('CREATE TABLE node_port (node_id TEXT PRIMARY KEY, port INTEGER NOT NULL UNIQUE, assigned_at INTEGER NOT NULL, released_at INTEGER, reusable_at INTEGER)')
       db.exec('CREATE TABLE settings (key TEXT PRIMARY KEY, value_json TEXT NOT NULL, updated_at INTEGER NOT NULL)')
       const settings = new SettingsStore(db)

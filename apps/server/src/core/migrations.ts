@@ -1,5 +1,8 @@
+import { sql } from 'drizzle-orm'
 import type { Db } from './db'
 import { logger } from './log'
+import { schemaMigrations } from './schema'
+import { DRIZZLE_MIGRATIONS } from './migrations.generated'
 
 export interface Migration {
   version: number
@@ -400,17 +403,28 @@ ALTER TABLE subscriptions ADD COLUMN content_text TEXT;
   },
 ]
 
+/** v1-v3 是手写历史迁移，已上线，永不回改；v4+ 来自 drizzle-kit（见 migrations.generated.ts）。 */
+const ALL_MIGRATIONS: Migration[] = [...MIGRATIONS, ...DRIZZLE_MIGRATIONS]
+
 export function runMigrations(db: Db): number {
   db.exec(`CREATE TABLE IF NOT EXISTS schema_migrations (version INTEGER PRIMARY KEY, name TEXT NOT NULL, applied_at INTEGER NOT NULL);`)
-  const done = new Set(db.all<{ version: number }>('SELECT version FROM schema_migrations').map((r) => r.version))
+  const done = new Set(
+    db.select({ version: schemaMigrations.version }).from(schemaMigrations).all().map((r) => r.version)
+  )
   let applied = 0
-  for (const m of MIGRATIONS) {
+  for (const m of ALL_MIGRATIONS) {
     if (done.has(m.version)) continue
-    const tx = db.tx(() => {
+    // 必须走 exec：drizzle 的 run() 底层是 prepare()，多语句只会执行第一条，
+    // 而一个迁移里通常有几十条 DDL（v1 就有 26 张表）。
+    db.raw.exec('BEGIN IMMEDIATE')
+    try {
       db.exec(m.sql)
-      db.run('INSERT INTO schema_migrations (version, name, applied_at) VALUES (?, ?, ?)', [m.version, m.name, Date.now()])
-    })
-    void tx
+      db.insert(schemaMigrations).values({ version: m.version, name: m.name, applied_at: Date.now() }).run()
+      db.raw.exec('COMMIT')
+    } catch (e) {
+      db.raw.exec('ROLLBACK')
+      throw e
+    }
     applied++
     logger.info(`migration applied: ${m.version} ${m.name}`)
   }
@@ -418,6 +432,9 @@ export function runMigrations(db: Db): number {
 }
 
 export function schemaVersion(db: Db): number {
-  const row = db.get<{ v: number | null }>('SELECT MAX(version) AS v FROM schema_migrations')
+  const row = db
+    .select({ v: sql<number | null>`max(${schemaMigrations.version})` })
+    .from(schemaMigrations)
+    .get()
   return row?.v ?? 0
 }

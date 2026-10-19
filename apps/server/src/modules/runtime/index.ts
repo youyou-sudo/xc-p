@@ -1,4 +1,6 @@
 import { Elysia } from 'elysia'
+import { desc, eq, getTableColumns } from 'drizzle-orm'
+import { nodeCredentials, nodes, revisionNodes, runtimeRevisions } from '../../core/schema'
 import type { AppContext } from '../../context'
 import { AppError } from '../../core/errors'
 import { parseBool, parsePaging } from '../../core/http'
@@ -19,7 +21,7 @@ export function runtimeModule(ctx: AppContext, session: SessionPlugin) {
       const status = publisher.currentStatus()
       const snapshot = await reconciler.readDataplane('health')
       const planInfo = await publisher.plan()
-      const latest = db.get<any>('SELECT * FROM runtime_revisions ORDER BY created_at DESC LIMIT 1')
+      const latest = db.select().from(runtimeRevisions).orderBy(desc(runtimeRevisions.created_at)).limit(1).get()
       return {
         revision: status.revision,
         dataplane: {
@@ -48,7 +50,13 @@ export function runtimeModule(ctx: AppContext, session: SessionPlugin) {
     }, { requireSession: true })
     .get('/runtime/revisions', ({ query }) => {
       const p = parsePaging(query)
-      const rows = db.all<any>('SELECT * FROM runtime_revisions ORDER BY created_at DESC LIMIT ? OFFSET ?', [p.limit, p.offset])
+      const rows = db
+        .select()
+        .from(runtimeRevisions)
+        .orderBy(desc(runtimeRevisions.created_at))
+        .limit(p.limit)
+        .offset(p.offset)
+        .all()
       return {
         items: rows.map((r) => ({
           id: r.id,
@@ -64,7 +72,18 @@ export function runtimeModule(ctx: AppContext, session: SessionPlugin) {
           plan: r.plan_json ? JSON.parse(r.plan_json) : null,
           validation: r.validation_json ? JSON.parse(r.validation_json) : null,
           error: r.error,
-          nodes: db.all('SELECT node_id, username, outbound_tag, inbound_tag, inbound_port FROM revision_nodes WHERE revision_id = ? LIMIT 500', [r.id]),
+          nodes: db
+            .select({
+              node_id: revisionNodes.node_id,
+              username: revisionNodes.username,
+              outbound_tag: revisionNodes.outbound_tag,
+              inbound_tag: revisionNodes.inbound_tag,
+              inbound_port: revisionNodes.inbound_port,
+            })
+            .from(revisionNodes)
+            .where(eq(revisionNodes.revision_id, r.id))
+            .limit(500)
+            .all(),
         })),
       }
     }, { requireSession: true })
@@ -132,7 +151,12 @@ export function runtimeModule(ctx: AppContext, session: SessionPlugin) {
       return { jobId, activeConns }
     }, { requireSession: true })
     .post('/runtime/node/:id/rebuild', ({ params }) => {
-      const node = db.get<any>('SELECT n.*, c.username FROM nodes n JOIN node_credentials c ON c.node_id = n.id WHERE n.id = ?', [params.id])
+      const node = db
+        .select({ ...getTableColumns(nodes), username: nodeCredentials.username })
+        .from(nodes)
+        .innerJoin(nodeCredentials, eq(nodeCredentials.node_id, nodes.id))
+        .where(eq(nodes.id, params.id))
+        .get()
       if (!node) throw new AppError('not_found', '节点不存在', 404)
       const jobId = jobs.enqueue(APPLY_QUEUE, 'publish', { nodeId: params.id }, 'panel', async () => {
         const template = JSON.parse(node.outbound_json) as Record<string, unknown>

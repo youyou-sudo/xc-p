@@ -1,4 +1,6 @@
 import { Elysia } from 'elysia'
+import { asc, count, desc, eq } from 'drizzle-orm'
+import { subscriptionRunErrors, subscriptionRuns, subscriptions, nodeSources } from '../../core/schema'
 import type { AppContext } from '../../context'
 import { AppError } from '../../core/errors'
 import { parsePaging } from '../../core/http'
@@ -19,7 +21,7 @@ export function subscriptionsModule(ctx: AppContext, session: SessionPlugin, ser
   return new Elysia({ name: 'api/subscriptions', prefix: '/api' })
     .use(session)
     .get('/subscriptions', () => {
-      const rows = db.all<any>('SELECT * FROM subscriptions ORDER BY created_at ASC')
+      const rows = db.select().from(subscriptions).orderBy(asc(subscriptions.created_at)).all()
       return {
         items: rows.map((r) => ({
           id: r.id,
@@ -38,7 +40,7 @@ export function subscriptionsModule(ctx: AppContext, session: SessionPlugin, ser
           lastError: r.last_error,
           lastErrorKind: r.last_error_kind,
           consecutiveFailures: r.consecutive_failures,
-          nodeCount: db.get<{ n: number }>('SELECT COUNT(*) AS n FROM node_sources WHERE subscription_id = ?', [r.id])?.n ?? 0,
+          nodeCount: db.select({ n: count() }).from(nodeSources).where(eq(nodeSources.subscription_id, r.id)).get()?.n ?? 0,
         })),
       }
     })
@@ -50,29 +52,28 @@ export function subscriptionsModule(ctx: AppContext, session: SessionPlugin, ser
         const now = Date.now()
         const isInline = !body.url
         const url = isInline ? 'inline://' + id : String(body.url)
-        const dup = db.get('SELECT id FROM subscriptions WHERE url = ?', [url])
+        const dup = db.select({ id: subscriptions.id }).from(subscriptions).where(eq(subscriptions.url, url)).get()
         if (dup) throw new AppError('conflict', '该订阅 URL 已存在', 409)
         const s = settings.get().subsync
-        db.run(
-          'INSERT INTO subscriptions (id, name, url, format_hint, enabled, interval_sec, cron, timeout_ms, retries, retry_backoff_ms, headers_json, user_agent, content_text, created_at, updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)',
-          [
+        db.insert(subscriptions)
+          .values({
             id,
-            body.name,
+            name: body.name,
             url,
-            normalizeFormatHint(body.formatHint),
-            body.enabled === false ? 0 : 1,
-            resolveIntervalSec(body.intervalSec, s.defaultIntervalSec),
-            body.cron ?? null,
-            body.timeoutMs ?? s.timeoutMs,
-            body.retries ?? s.retries,
-            body.retryBackoffMs ?? s.retryBackoffMs,
-            body.headers ? JSON.stringify(body.headers) : null,
-            body.userAgent ?? null,
-            isInline ? String(body.text) : null,
-            now,
-            now,
-          ],
-        )
+            format_hint: normalizeFormatHint(body.formatHint),
+            enabled: body.enabled === false ? 0 : 1,
+            interval_sec: resolveIntervalSec(body.intervalSec, s.defaultIntervalSec),
+            cron: body.cron ?? null,
+            timeout_ms: body.timeoutMs ?? s.timeoutMs,
+            retries: body.retries ?? s.retries,
+            retry_backoff_ms: body.retryBackoffMs ?? s.retryBackoffMs,
+            headers_json: body.headers ? JSON.stringify(body.headers) : null,
+            user_agent: body.userAgent ?? null,
+            content_text: isInline ? String(body.text) : null,
+            created_at: now,
+            updated_at: now,
+          })
+          .run()
         auth.audit('panel', 'admin', 'subscription.create', id, null, { name: body.name })
         events.info('subscription.created', '新建订阅「' + body.name + '」', { subscriptionId: id })
         return { id }
@@ -82,58 +83,44 @@ export function subscriptionsModule(ctx: AppContext, session: SessionPlugin, ser
     .patch(
       '/subscriptions/:id',
       ({ params, body }) => {
-        const row = db.get<any>('SELECT * FROM subscriptions WHERE id = ?', [params.id])
+        const row = db.select({ id: subscriptions.id }).from(subscriptions).where(eq(subscriptions.id, params.id)).get()
         if (!row) throw new AppError('not_found', '订阅不存在', 404)
-        const map: Record<string, string> = {
-          name: 'name',
-          formatHint: 'format_hint',
-          intervalSec: 'interval_sec',
-          cron: 'cron',
-          timeoutMs: 'timeout_ms',
-          retries: 'retries',
-          userAgent: 'user_agent',
-          url: 'url',
-        }
-        // 动态列映射需要按字符串索引；模型仍负责校验，运行时行为不变。
-        const patch: Record<string, unknown> = { ...body }
-        const sets: string[] = []
-        const values: any[] = []
-        for (const [k, col] of Object.entries(map)) {
-          if (patch[k] !== undefined) {
-            sets.push(col + ' = ?')
-            values.push(k === 'formatHint' ? normalizeFormatHint(String(patch[k])) : patch[k])
-          }
-        }
-        if (body.enabled !== undefined) {
-          sets.push('enabled = ?')
-          values.push(body.enabled ? 1 : 0)
-        }
-        if (body.text !== undefined) {
-          sets.push('content_text = ?')
-          values.push(String(body.text))
-        }
-        if (sets.length === 0) return { ok: true }
-        sets.push('updated_at = ?')
-        values.push(Date.now(), params.id)
-        db.run('UPDATE subscriptions SET ' + sets.join(', ') + ' WHERE id = ?', values)
+        const patch: Partial<typeof subscriptions.$inferInsert> = {}
+        if (body.name !== undefined) patch.name = body.name
+        if (body.formatHint !== undefined) patch.format_hint = normalizeFormatHint(String(body.formatHint))
+        if (body.intervalSec !== undefined) patch.interval_sec = body.intervalSec
+        if (body.cron !== undefined) patch.cron = body.cron
+        if (body.timeoutMs !== undefined) patch.timeout_ms = body.timeoutMs
+        if (body.retries !== undefined) patch.retries = body.retries
+        if (body.userAgent !== undefined) patch.user_agent = body.userAgent
+        if (body.url !== undefined) patch.url = body.url
+        if (body.enabled !== undefined) patch.enabled = body.enabled ? 1 : 0
+        if (body.text !== undefined) patch.content_text = String(body.text)
+        if (Object.keys(patch).length === 0) return { ok: true }
+        patch.updated_at = Date.now()
+        db.update(subscriptions).set(patch).where(eq(subscriptions.id, params.id)).run()
         auth.audit('panel', 'admin', 'subscription.update', params.id, null, body)
         return { ok: true }
       },
       { body: subscriptionUpdateBody, requireSession: true },
     )
     .delete('/subscriptions/:id', ({ params }) => {
-      db.run('DELETE FROM subscriptions WHERE id = ?', [params.id])
-      db.run('DELETE FROM node_sources WHERE subscription_id = ?', [params.id])
+      db.delete(subscriptions).where(eq(subscriptions.id, params.id)).run()
+      db.delete(nodeSources).where(eq(nodeSources.subscription_id, params.id)).run()
       auth.audit('panel', 'admin', 'subscription.delete', params.id, null, null)
       events.warn('subscription.deleted', '已删除订阅 ' + params.id, { subscriptionId: params.id })
       return { ok: true }
     }, { requireSession: true })
     .get('/subscriptions/:id/runs', ({ params, query }) => {
       const p = parsePaging(query)
-      const runs = db.all<any>(
-        'SELECT * FROM subscription_runs WHERE subscription_id = ? ORDER BY started_at DESC LIMIT ? OFFSET ?',
-        [params.id, p.limit, p.offset],
-      )
+      const runs = db
+        .select()
+        .from(subscriptionRuns)
+        .where(eq(subscriptionRuns.subscription_id, params.id))
+        .orderBy(desc(subscriptionRuns.started_at))
+        .limit(p.limit)
+        .offset(p.offset)
+        .all()
       return {
         items: runs.map((r) => ({
           id: r.id,
@@ -153,7 +140,17 @@ export function subscriptionsModule(ctx: AppContext, session: SessionPlugin, ser
           parseErrors: r.parse_errors,
           errorKind: r.error_kind,
           errorMsg: r.error_msg,
-          errors: db.all('SELECT line_no, raw_snippet, error_kind, error_msg FROM subscription_run_errors WHERE run_id = ? LIMIT 20', [r.id]),
+          errors: db
+            .select({
+              line_no: subscriptionRunErrors.line_no,
+              raw_snippet: subscriptionRunErrors.raw_snippet,
+              error_kind: subscriptionRunErrors.error_kind,
+              error_msg: subscriptionRunErrors.error_msg,
+            })
+            .from(subscriptionRunErrors)
+            .where(eq(subscriptionRunErrors.run_id, r.id))
+            .limit(20)
+            .all(),
         })),
       }
     }, { requireSession: true })

@@ -1,4 +1,6 @@
 import { Elysia } from 'elysia'
+import { asc, desc, eq, isNotNull } from 'drizzle-orm'
+import { nodeAliases, nodeCheckRuns, nodeCredentials, nodePort, nodeSources, nodeStatus, nodes as nodesT } from '../../core/schema'
 import type { AppContext } from '../../context'
 import { AppError } from '../../core/errors'
 import { clientIp, parsePaging } from '../../core/http'
@@ -23,54 +25,34 @@ export function nodesModule(ctx: AppContext, session: SessionPlugin, service: No
     .patch(
       '/nodes/:id',
       ({ params, body }) => {
-        const row = db.get('SELECT id FROM nodes WHERE id = ?', [params.id])
+        const row = db.select({ id: nodesT.id }).from(nodesT).where(eq(nodesT.id, params.id)).get()
         if (!row) throw new AppError('not_found', '节点不存在', 404)
-        const sets: string[] = []
-        const values: any[] = []
-        if (body.displayName !== undefined) {
-          sets.push('display_name = ?')
-          values.push(String(body.displayName))
-        }
-        if (body.enabled !== undefined) {
-          sets.push('enabled = ?')
-          values.push(body.enabled ? 1 : 0)
-        }
-        if (body.countryCode !== undefined) {
-          sets.push('country_code = ?')
-          values.push(body.countryCode ? String(body.countryCode).toUpperCase() : null)
-        }
-        if (body.region !== undefined) {
-          sets.push('region = ?')
-          values.push(body.region ?? null)
-        }
-        if (body.publishPolicyOverride !== undefined) {
-          sets.push('publish_policy_override = ?')
-          values.push(body.publishPolicyOverride ?? null)
-        }
-        if (body.checkDepth !== undefined) {
-          sets.push('check_depth = ?')
-          values.push(body.checkDepth === 'lite' ? 'lite' : 'full')
-        }
+        const patch: Partial<typeof nodesT.$inferInsert> = {}
+        if (body.displayName !== undefined) patch.display_name = String(body.displayName)
+        if (body.enabled !== undefined) patch.enabled = body.enabled ? 1 : 0
+        if (body.countryCode !== undefined) patch.country_code = body.countryCode ? String(body.countryCode).toUpperCase() : null
+        if (body.region !== undefined) patch.region = body.region ?? null
+        if (body.publishPolicyOverride !== undefined) patch.publish_policy_override = body.publishPolicyOverride ?? null
+        if (body.checkDepth !== undefined) patch.check_depth = body.checkDepth === 'lite' ? 'lite' : 'full'
         if (body.rename) {
           // 改名 = 旧 ID 进 node_aliases（active=1），新旧用户名都能用（§7.4）
           const newId = String(body.rename)
           if (!/^[A-Za-z0-9_.-]{2,32}$/.test(newId)) throw new AppError('validation_failed', '新节点 ID 只允许字母数字与 _.-', 422)
-          if (db.get('SELECT id FROM nodes WHERE id = ?', [newId])) throw new AppError('conflict', '节点 ID 已存在', 409)
-          db.run('INSERT INTO node_aliases (alias, node_id, created_at, active) VALUES (?,?,?,1)', [params.id, newId, Date.now()])
-          db.run('UPDATE nodes SET id = ?, display_name = ? WHERE id = ?', [newId, body.displayName ?? newId, params.id])
-          db.run('UPDATE node_credentials SET node_id = ?, username = ? WHERE node_id = ?', [newId, newId, params.id])
-          db.run('UPDATE node_sources SET node_id = ? WHERE node_id = ?', [newId, params.id])
-          db.run('UPDATE node_port SET node_id = ? WHERE node_id = ?', [newId, params.id])
-          db.run('UPDATE node_status SET node_id = ? WHERE node_id = ?', [newId, params.id])
-          db.run('UPDATE node_check_runs SET node_id = ? WHERE node_id = ?', [newId, params.id])
+          if (db.select({ id: nodesT.id }).from(nodesT).where(eq(nodesT.id, newId)).get()) throw new AppError('conflict', '节点 ID 已存在', 409)
+          db.insert(nodeAliases).values({ alias: params.id, node_id: newId, created_at: Date.now(), active: 1 }).run()
+          db.update(nodesT).set({ id: newId, display_name: body.displayName ?? newId }).where(eq(nodesT.id, params.id)).run()
+          db.update(nodeCredentials).set({ node_id: newId, username: newId }).where(eq(nodeCredentials.node_id, params.id)).run()
+          db.update(nodeSources).set({ node_id: newId }).where(eq(nodeSources.node_id, params.id)).run()
+          db.update(nodePort).set({ node_id: newId }).where(eq(nodePort.node_id, params.id)).run()
+          db.update(nodeStatus).set({ node_id: newId }).where(eq(nodeStatus.node_id, params.id)).run()
+          db.update(nodeCheckRuns).set({ node_id: newId }).where(eq(nodeCheckRuns.node_id, params.id)).run()
           auth.audit('panel', 'admin', 'node.rename', params.id, null, { to: newId })
           events.warn('node.renamed', '节点 ' + params.id + ' 改名为 ' + newId + '（别名仍可路由）', { nodeId: newId })
           return { ok: true, id: newId }
         }
-        if (sets.length === 0) return { ok: true }
-        sets.push('updated_at = ?')
-        values.push(Date.now(), params.id)
-        db.run('UPDATE nodes SET ' + sets.join(', ') + ' WHERE id = ?', values)
+        if (Object.keys(patch).length === 0) return { ok: true }
+        patch.updated_at = Date.now()
+        db.update(nodesT).set(patch).where(eq(nodesT.id, params.id)).run()
         auth.audit('panel', 'admin', 'node.update', params.id, null, body)
         return { ok: true }
       },
@@ -91,7 +73,12 @@ export function nodesModule(ctx: AppContext, session: SessionPlugin, service: No
     }, { requireSession: true })
     .post('/nodes/purge-missing', () => {
       // 「已消失」= 当前所有订阅都不再提供该节点（同步时写入 missing_since）。
-      const rows = db.all<{ id: string }>('SELECT id FROM nodes WHERE missing_since IS NOT NULL ORDER BY id ASC')
+      const rows = db
+        .select({ id: nodesT.id })
+        .from(nodesT)
+        .where(isNotNull(nodesT.missing_since))
+        .orderBy(asc(nodesT.id))
+        .all()
       let removed = 0
       let needApply = false
       let closed = 0
@@ -122,7 +109,14 @@ export function nodesModule(ctx: AppContext, session: SessionPlugin, service: No
     .get('/nodes/:id/checks', ({ params, query }) => {
       const p = parsePaging(query)
       return {
-        items: db.all<any>('SELECT * FROM node_check_runs WHERE node_id = ? ORDER BY at DESC LIMIT ? OFFSET ?', [params.id, p.limit, p.offset]),
+        items: db
+          .select()
+          .from(nodeCheckRuns)
+          .where(eq(nodeCheckRuns.node_id, params.id))
+          .orderBy(desc(nodeCheckRuns.at))
+          .limit(p.limit)
+          .offset(p.offset)
+          .all(),
       }
     }, { requireSession: true })
     .get('/nodes/:id/connection', ({ params }) => {

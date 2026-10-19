@@ -1,4 +1,6 @@
+import { and, asc, desc, eq, inArray, isNull, lte, notInArray, or, sql } from 'drizzle-orm'
 import type { Db } from '../core/db'
+import { nodeCheckRuns, nodeCredentials, nodeStatus, nodes as nodesT } from '../core/schema'
 import type { EventBus } from '../core/events'
 import type { SettingsStore } from '../core/settings'
 import { decryptSecret } from '../core/crypto'
@@ -113,20 +115,25 @@ export class Detector {
 
   /** 载入可检测目标（默认只针对 enabled、protocol_supported、未隔离，§8.4） */
   loadTargets(nodeIds?: string[], includeQuarantined = false): DetectTarget[] {
-    const where: string[] = ['n.enabled = 1', 'n.protocol_supported = 1']
-    const params: (string | number)[] = []
-    if (nodeIds && nodeIds.length) {
-      where.push('n.id IN (' + nodeIds.map(() => '?').join(',') + ')')
-      params.push(...nodeIds)
-    }
-    if (!includeQuarantined) where.push("COALESCE(st.state,'unknown') != 'quarantined'")
-    const rows = this.deps.db.all<any>(
-      'SELECT n.id AS node_id, n.protocol, c.username, c.password_enc, COALESCE(st.state,\'unknown\') AS state, ' +
-        'COALESCE(st.fail_streak,0) AS fail_streak, COALESCE(st.success_streak,0) AS success_streak ' +
-        'FROM nodes n JOIN node_credentials c ON c.node_id = n.id LEFT JOIN node_status st ON st.node_id = n.id ' +
-        'WHERE ' + where.join(' AND ') + ' ORDER BY n.id ASC',
-      params,
-    )
+    const conds = [eq(nodesT.enabled, 1), eq(nodesT.protocol_supported, 1)]
+    if (nodeIds && nodeIds.length) conds.push(inArray(nodesT.id, nodeIds))
+    if (!includeQuarantined) conds.push(sql`COALESCE(${nodeStatus.state}, 'unknown') != 'quarantined'`)
+    const rows = this.deps.db
+      .select({
+        node_id: nodesT.id,
+        protocol: nodesT.protocol,
+        username: nodeCredentials.username,
+        password_enc: nodeCredentials.password_enc,
+        state: sql<string>`COALESCE(${nodeStatus.state}, 'unknown')`,
+        fail_streak: sql<number>`COALESCE(${nodeStatus.fail_streak}, 0)`,
+        success_streak: sql<number>`COALESCE(${nodeStatus.success_streak}, 0)`,
+      })
+      .from(nodesT)
+      .innerJoin(nodeCredentials, eq(nodeCredentials.node_id, nodesT.id))
+      .leftJoin(nodeStatus, eq(nodeStatus.node_id, nodesT.id))
+      .where(and(...conds))
+      .orderBy(asc(nodesT.id))
+      .all()
     return rows.map((r) => ({
       nodeId: r.node_id,
       username: r.username,
@@ -222,9 +229,12 @@ export class Detector {
     const flush = () => {
       if (buffer.length === 0) return
       const batch = buffer.splice(0, buffer.length)
-      this.deps.db.tx(() => {
-        for (const r of batch) this.persist(r, opts.source, depth)
-      })
+      this.deps.db.transaction(
+        () => {
+          for (const r of batch) this.persist(r, opts.source, depth)
+        },
+        { behavior: 'immediate' }
+      )
     }
 
     await Promise.all(
@@ -264,7 +274,7 @@ export class Detector {
   persist(r: CheckResult, source: string, depth: 'lite' | 'full'): void {
     const s = this.deps.settings.get()
     const now = Date.now()
-    const prev = this.deps.db.get<any>('SELECT * FROM node_status WHERE node_id = ?', [r.nodeId])
+    const prev = this.deps.db.select().from(nodeStatus).where(eq(nodeStatus.node_id, r.nodeId)).get()
     const prevState: NodeState = (prev?.state as NodeState) ?? 'unknown'
     const out = nextState({
       prev: prevState,
@@ -310,46 +320,33 @@ export class Detector {
       updated_at: now,
     }
 
-    // 注意：用**位置参数**而不是命名参数——bun:sqlite 的命名参数绑定在部分版本下
-    // 会静默失败（表现为 NOT NULL constraint failed: node_status.state）。
-    const cols = [
-      'node_id', 'state', 'last_check_at', 'last_ok_at', 'last_fail_at', 'recovered_at',
-      'connect_ms', 'handshake_ms', 'total_ms', 'delay_ms',
-      'exit_ip', 'exit_country', 'exit_region', 'exit_asn', 'exit_isp',
-      'error_kind', 'error_msg', 'fail_streak', 'success_streak', 'next_check_at',
-      'checks_total', 'checks_ok', 'uptime_24h', 'updated_at',
-    ] as const
-    const values = cols.map((c) => (row as any)[c] as any)
-    this.deps.db.run(
-      'INSERT INTO node_status (' + cols.join(',') + ') VALUES (' + cols.map(() => '?').join(',') + ') ' +
-        'ON CONFLICT(node_id) DO UPDATE SET ' +
-        cols
-          .filter((c) => c !== 'node_id')
-          .map((c) => c + '=excluded.' + c)
-          .join(', '),
-      values,
-    )
+    const { node_id: _nodeId, ...statusSet } = row
+    this.deps.db
+      .insert(nodeStatus)
+      .values(row)
+      .onConflictDoUpdate({ target: nodeStatus.node_id, set: statusSet })
+      .run()
 
-    this.deps.db.run(
-      'INSERT INTO node_check_runs (node_id, at, source, ok, stage_reached, connect_ms, handshake_ms, total_ms, delay_ms, http_status, exit_ip, exit_country, error_kind, error_msg, detail_json) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)',
-      [
-        r.nodeId,
-        now,
+    this.deps.db
+      .insert(nodeCheckRuns)
+      .values({
+        node_id: r.nodeId,
+        at: now,
         source,
-        r.ok ? 1 : 0,
-        r.stageReached,
-        r.connectMs ?? null,
-        r.handshakeMs ?? null,
-        r.totalMs ?? null,
-        r.delayMs ?? null,
-        r.httpStatus ?? null,
-        r.exit?.ip ?? null,
-        r.exit?.country ?? null,
-        r.ok ? null : (r.errorKind ?? 'internal'),
-        r.ok ? null : (r.errorMsg ?? '').slice(0, 200),
-        JSON.stringify({ depth, exit: r.exit ?? null }),
-      ],
-    )
+        ok: r.ok ? 1 : 0,
+        stage_reached: r.stageReached,
+        connect_ms: r.connectMs ?? null,
+        handshake_ms: r.handshakeMs ?? null,
+        total_ms: r.totalMs ?? null,
+        delay_ms: r.delayMs ?? null,
+        http_status: r.httpStatus ?? null,
+        exit_ip: r.exit?.ip ?? null,
+        exit_country: r.exit?.country ?? null,
+        error_kind: r.ok ? null : (r.errorKind ?? 'internal'),
+        error_msg: r.ok ? null : (r.errorMsg ?? '').slice(0, 200),
+        detail_json: JSON.stringify({ depth, exit: r.exit ?? null }),
+      })
+      .run()
 
     if (prevState !== out.state) {
       if (out.state === 'quarantined') {
@@ -367,12 +364,25 @@ export class Detector {
   trimHistory(): number {
     const keep = this.deps.settings.get().detect.historyKeep
     let removed = 0
-    const nodes = this.deps.db.all<{ node_id: string }>('SELECT DISTINCT node_id FROM node_check_runs')
+    const nodes = this.deps.db.selectDistinct({ node_id: nodeCheckRuns.node_id }).from(nodeCheckRuns).all()
     for (const n of nodes) {
-      const r = this.deps.db.run(
-        'DELETE FROM node_check_runs WHERE node_id = ? AND id NOT IN (SELECT id FROM node_check_runs WHERE node_id = ? ORDER BY at DESC LIMIT ?)',
-        [n.node_id, n.node_id, keep],
-      )
+      const r = this.deps.db
+        .delete(nodeCheckRuns)
+        .where(
+          and(
+            eq(nodeCheckRuns.node_id, n.node_id),
+            notInArray(
+              nodeCheckRuns.id,
+              this.deps.db
+                .select({ id: nodeCheckRuns.id })
+                .from(nodeCheckRuns)
+                .where(eq(nodeCheckRuns.node_id, n.node_id))
+                .orderBy(desc(nodeCheckRuns.at))
+                .limit(keep)
+            )
+          )
+        )
+        .run()
       removed += r.changes
     }
     return removed
@@ -381,12 +391,21 @@ export class Detector {
   /** 到期需要检测的节点（调度器用，§13） */
   dueTargets(limit = 500): DetectTarget[] {
     const now = Date.now()
-    const rows = this.deps.db.all<any>(
-      'SELECT n.id AS node_id FROM nodes n JOIN node_credentials c ON c.node_id = n.id ' +
-        "LEFT JOIN node_status st ON st.node_id = n.id WHERE n.enabled = 1 AND n.protocol_supported = 1 " +
-        'AND (st.next_check_at IS NULL OR st.next_check_at <= ?) ORDER BY COALESCE(st.next_check_at, 0) ASC LIMIT ?',
-      [now, limit],
-    )
+    const rows = this.deps.db
+      .select({ node_id: nodesT.id })
+      .from(nodesT)
+      .innerJoin(nodeCredentials, eq(nodeCredentials.node_id, nodesT.id))
+      .leftJoin(nodeStatus, eq(nodeStatus.node_id, nodesT.id))
+      .where(
+        and(
+          eq(nodesT.enabled, 1),
+          eq(nodesT.protocol_supported, 1),
+          or(isNull(nodeStatus.next_check_at), lte(nodeStatus.next_check_at, now))
+        )
+      )
+      .orderBy(sql`COALESCE(${nodeStatus.next_check_at}, 0) ASC`)
+      .limit(limit)
+      .all()
     if (rows.length === 0) return []
     return this.loadTargets(rows.map((r) => r.node_id), true)
   }
