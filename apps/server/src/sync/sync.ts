@@ -1,4 +1,13 @@
+import { and, asc, count, desc, eq, gte, isNull, lte, ne, notInArray, sql } from 'drizzle-orm'
 import type { Db } from '../core/db'
+import {
+  nodeCredentials,
+  nodeSources,
+  nodes as nodesT,
+  subscriptionRunErrors,
+  subscriptionRuns,
+  subscriptions,
+} from '../core/schema'
 import type { EventBus } from '../core/events'
 import type { SettingsStore } from '../core/settings'
 import { decryptSecret, encryptSecret, generateNodePassword, passwordLookupHash, sha1Hex } from '../core/crypto'
@@ -64,9 +73,10 @@ export class SyncService {
   constructor(private deps: SyncDeps) {}
 
   listSubscriptions(enabledOnly = false): SubscriptionRow[] {
-    return this.deps.db.all<SubscriptionRow>(
-      'SELECT * FROM subscriptions' + (enabledOnly ? ' WHERE enabled = 1' : '') + ' ORDER BY created_at ASC',
-    )
+    const base = this.deps.db.select().from(subscriptions)
+    return (enabledOnly ? base.where(eq(subscriptions.enabled, 1)) : base)
+      .orderBy(asc(subscriptions.created_at))
+      .all() as SubscriptionRow[]
   }
 
   /** 取回订阅正文：超时/重试/ETag/大小上限（§7.1） */
@@ -74,7 +84,11 @@ export class SyncService {
     const s = this.deps.settings.get().subsync
     // 内联文本订阅（面板直接粘贴）：不发任何 HTTP 请求
     if (sub.url.startsWith('inline://')) {
-      const row = this.deps.db.get<{ content_text: string | null }>('SELECT content_text FROM subscriptions WHERE id = ?', [sub.id])
+      const row = this.deps.db
+        .select({ content_text: subscriptions.content_text })
+        .from(subscriptions)
+        .where(eq(subscriptions.id, sub.id))
+        .get()
       const text = row?.content_text ?? ''
       if (!text.trim()) throw Object.assign(new Error('内联订阅内容为空'), { kind: 'empty_result' })
       if (text.length > s.maxBytes) throw Object.assign(new Error('内联订阅内容超过大小上限'), { kind: 'too_large' })
@@ -120,12 +134,15 @@ export class SyncService {
         // 记录 ETag / Last-Modified
         const etag = res.headers.get('etag')
         const lm = res.headers.get('last-modified')
-        this.deps.db.run('UPDATE subscriptions SET etag = COALESCE(?, etag), last_modified = COALESCE(?, last_modified), updated_at = ? WHERE id = ?', [
-          etag,
-          lm,
-          Date.now(),
-          sub.id,
-        ])
+        this.deps.db
+          .update(subscriptions)
+          .set({
+            etag: sql`COALESCE(${etag}, ${subscriptions.etag})`,
+            last_modified: sql`COALESCE(${lm}, ${subscriptions.last_modified})`,
+            updated_at: Date.now(),
+          })
+          .where(eq(subscriptions.id, sub.id))
+          .run()
         return { notModified: false, body, httpStatus: res.status, bytes: buf.byteLength }
       } catch (e) {
         clearTimeout(timer)
@@ -171,14 +188,14 @@ export class SyncService {
 
   /** 执行一次同步（SyncJob 主体） */
   async runSync(subscriptionId: string, trigger: 'manual' | 'cron' | 'api', opts: { force?: boolean } = {}): Promise<SyncResult> {
-    const sub = this.deps.db.get<SubscriptionRow>('SELECT * FROM subscriptions WHERE id = ?', [subscriptionId])
+    const sub = this.deps.db.select().from(subscriptions).where(eq(subscriptions.id, subscriptionId)).get() as SubscriptionRow | undefined
     if (!sub) throw new Error('订阅不存在: ' + subscriptionId)
     const started = Date.now()
     const runId = randomId('run_')
-    this.deps.db.run(
-      'INSERT INTO subscription_runs (id, subscription_id, trigger, started_at, status) VALUES (?,?,?,?,?)',
-      [runId, subscriptionId, trigger, started, 'running'],
-    )
+    this.deps.db
+      .insert(subscriptionRuns)
+      .values({ id: runId, subscription_id: subscriptionId, trigger, started_at: started, status: 'running' })
+      .run()
 
     let fetchInfo: { notModified: boolean; body: string; httpStatus: number; bytes: number }
     try {
@@ -205,16 +222,16 @@ export class SyncService {
     }
 
     if (fetchInfo.notModified) {
-      this.deps.db.run(
-        'UPDATE subscription_runs SET status=?, finished_at=?, http_status=?, bytes=?, duration_ms=?, error_kind=? WHERE id=?',
-        ['ok', Date.now(), 304, 0, Date.now() - started, 'not_modified', runId],
-      )
-      this.deps.db.run('UPDATE subscriptions SET last_sync_at = ?, last_status = ?, consecutive_failures = 0, updated_at = ? WHERE id = ?', [
-        Date.now(),
-        'ok',
-        Date.now(),
-        sub.id,
-      ])
+      this.deps.db
+        .update(subscriptionRuns)
+        .set({ status: 'ok', finished_at: Date.now(), http_status: 304, bytes: 0, duration_ms: Date.now() - started, error_kind: 'not_modified' })
+        .where(eq(subscriptionRuns.id, runId))
+        .run()
+      this.deps.db
+        .update(subscriptions)
+        .set({ last_sync_at: Date.now(), last_status: 'ok', consecutive_failures: 0, updated_at: Date.now() })
+        .where(eq(subscriptions.id, sub.id))
+        .run()
       this.deps.events.info('sync.not_modified', '订阅「' + sub.name + '」未变更（304）', { subscriptionId })
       return {
         subscriptionId,
@@ -259,32 +276,38 @@ export class SyncService {
 
     const counts = this.applyNodes(sub, parsed.nodes)
     const durationMs = Date.now() - started
-    this.deps.db.run(
-      'UPDATE subscription_runs SET status=?, finished_at=?, http_status=?, bytes=?, duration_ms=?, total_found=?, added=?, changed=?, removed=?, restored=?, unsupported=?, parse_errors=?, result_digest=? WHERE id=?',
-      [
-        'ok',
-        Date.now(),
-        fetchInfo.httpStatus,
-        fetchInfo.bytes,
-        durationMs,
-        parsed.total,
-        counts.added,
-        counts.changed,
-        counts.removed,
-        counts.restored,
-        counts.unsupported,
-        parsed.errors.length,
-        sha1Hex(stableStringify(parsed.nodes.map((n) => n.fingerprint).sort())),
-        runId,
-      ],
-    )
+    this.deps.db
+      .update(subscriptionRuns)
+      .set({
+        status: 'ok',
+        finished_at: Date.now(),
+        http_status: fetchInfo.httpStatus,
+        bytes: fetchInfo.bytes,
+        duration_ms: durationMs,
+        total_found: parsed.total,
+        added: counts.added,
+        changed: counts.changed,
+        removed: counts.removed,
+        restored: counts.restored,
+        unsupported: counts.unsupported,
+        parse_errors: parsed.errors.length,
+        result_digest: sha1Hex(stableStringify(parsed.nodes.map((n) => n.fingerprint).sort())),
+      })
+      .where(eq(subscriptionRuns.id, runId))
+      .run()
     if (parsed.errors.length) this.insertRunErrors(runId, parsed.errors)
-    this.deps.db.run('UPDATE subscriptions SET last_sync_at = ?, last_status = ?, last_error = NULL, last_error_kind = NULL, consecutive_failures = 0, updated_at = ? WHERE id = ?', [
-      Date.now(),
-      'ok',
-      Date.now(),
-      sub.id,
-    ])
+    this.deps.db
+      .update(subscriptions)
+      .set({
+        last_sync_at: Date.now(),
+        last_status: 'ok',
+        last_error: null,
+        last_error_kind: null,
+        consecutive_failures: 0,
+        updated_at: Date.now(),
+      })
+      .where(eq(subscriptions.id, sub.id))
+      .run()
     this.trimRuns(sub.id)
     this.deps.events.info(
       'sync.done',
@@ -322,46 +345,62 @@ export class SyncService {
 
     const seenFingerprints = new Set<string>()
 
-    this.deps.db.tx(() => {
+    this.deps.db.transaction(
+      () => {
       for (const n of nodes) {
         seenFingerprints.add(n.fingerprint)
         if (!n.protocolSupported) unsupported++
-        const existing = this.deps.db.get<any>('SELECT * FROM nodes WHERE fingerprint = ?', [n.fingerprint])
+        const existing = this.deps.db.select().from(nodesT).where(eq(nodesT.fingerprint, n.fingerprint)).get()
         if (!existing) {
           const id = this.allocateId(n.name)
-          this.deps.db.run(
-            'INSERT INTO nodes (id, display_name, country_code, region, protocol, fingerprint, params_hash, outbound_json, protocol_supported, enabled, is_virtual, first_seen_at, last_seen_at, created_at, updated_at) VALUES (?,?,?,?,?,?,?,?,?,1,0,?,?,?,?)',
-            [
+          this.deps.db
+            .insert(nodesT)
+            .values({
               id,
-              n.name,
-              n.protocolSupported ? regionKey(n.name)?.toUpperCase() ?? null : null,
-              typeof n.params.region === 'string' ? n.params.region : null,
-              n.protocol,
-              n.fingerprint,
-              n.paramsHash,
-              JSON.stringify(n.outbound),
-              n.protocolSupported ? 1 : 0,
-              now,
-              now,
-              now,
-              now,
-            ],
-          )
+              display_name: n.name,
+              country_code: n.protocolSupported ? (regionKey(n.name)?.toUpperCase() ?? null) : null,
+              region: typeof n.params.region === 'string' ? n.params.region : null,
+              protocol: n.protocol,
+              fingerprint: n.fingerprint,
+              params_hash: n.paramsHash,
+              outbound_json: JSON.stringify(n.outbound),
+              protocol_supported: n.protocolSupported ? 1 : 0,
+              enabled: 1,
+              is_virtual: 0,
+              first_seen_at: now,
+              last_seen_at: now,
+              created_at: now,
+              updated_at: now,
+            })
+            .run()
           this.ensureCredential(id)
           added++
         } else {
           const paramsChanged = existing.params_hash !== n.paramsHash || existing.display_name !== n.name
           if (paramsChanged) {
-            this.deps.db.run(
-              'UPDATE nodes SET display_name=?, protocol=?, params_hash=?, outbound_json=?, protocol_supported=?, last_seen_at=?, updated_at=? WHERE id=?',
-              [n.name, n.protocol, n.paramsHash, JSON.stringify(n.outbound), n.protocolSupported ? 1 : 0, now, now, existing.id],
-            )
+            this.deps.db
+              .update(nodesT)
+              .set({
+                display_name: n.name,
+                protocol: n.protocol,
+                params_hash: n.paramsHash,
+                outbound_json: JSON.stringify(n.outbound),
+                protocol_supported: n.protocolSupported ? 1 : 0,
+                last_seen_at: now,
+                updated_at: now,
+              })
+              .where(eq(nodesT.id, existing.id))
+              .run()
             changed++
           } else {
-            this.deps.db.run('UPDATE nodes SET last_seen_at=?, updated_at=? WHERE id=?', [now, now, existing.id])
+            this.deps.db.update(nodesT).set({ last_seen_at: now, updated_at: now }).where(eq(nodesT.id, existing.id)).run()
           }
           if (existing.missing_since !== null) {
-            this.deps.db.run('UPDATE nodes SET missing_since=NULL, stale_until=NULL, enabled=1, updated_at=? WHERE id=?', [now, existing.id])
+            this.deps.db
+              .update(nodesT)
+              .set({ missing_since: null, stale_until: null, enabled: 1, updated_at: now })
+              .where(eq(nodesT.id, existing.id))
+              .run()
             restored++
           }
           this.ensureCredential(existing.id)
@@ -369,61 +408,92 @@ export class SyncService {
       }
 
       // 本订阅不再提供的节点 → missing_since（不删凭据、不立即动数据面，§7.5）
-      const owned = this.deps.db.all<{ node_id: string; fingerprint: string }>(
-        'SELECT ns.node_id, n.fingerprint FROM node_sources ns JOIN nodes n ON n.id = ns.node_id WHERE ns.subscription_id = ?',
-        [sub.id],
-      )
+      const owned = this.deps.db
+        .select({ node_id: nodeSources.node_id, fingerprint: nodesT.fingerprint })
+        .from(nodeSources)
+        .innerJoin(nodesT, eq(nodesT.id, nodeSources.node_id))
+        .where(eq(nodeSources.subscription_id, sub.id))
+        .all()
       for (const o of owned) {
         if (seenFingerprints.has(o.fingerprint)) continue
-        const otherSources = this.deps.db.get<{ n: number }>(
-          'SELECT COUNT(*) AS n FROM node_sources WHERE node_id = ? AND subscription_id != ? AND last_seen_at >= ?',
-          [o.node_id, sub.id, now - 1000],
-        )
+        const otherSources = this.deps.db
+          .select({ n: count() })
+          .from(nodeSources)
+          .where(and(eq(nodeSources.node_id, o.node_id), ne(nodeSources.subscription_id, sub.id), gte(nodeSources.last_seen_at, now - 1000)))
+          .get()
         if ((otherSources?.n ?? 0) > 0) continue
-        this.deps.db.run('UPDATE nodes SET missing_since = COALESCE(missing_since, ?), stale_until = COALESCE(stale_until, ?), updated_at = ? WHERE id = ?', [
-          now,
-          staleUntil,
-          now,
-          o.node_id,
-        ])
+        this.deps.db
+          .update(nodesT)
+          .set({
+            missing_since: sql`COALESCE(${nodesT.missing_since}, ${now})`,
+            stale_until: sql`COALESCE(${nodesT.stale_until}, ${staleUntil})`,
+            updated_at: now,
+          })
+          .where(eq(nodesT.id, o.node_id))
+          .run()
       }
 
       // 写 node_sources
       const byFingerprint = new Map(nodes.map((n) => [n.fingerprint, n]))
       for (const n of nodes) {
-        const nodeRow = this.deps.db.get<{ id: string }>('SELECT id FROM nodes WHERE fingerprint = ?', [n.fingerprint])
+        const nodeRow = this.deps.db.select({ id: nodesT.id }).from(nodesT).where(eq(nodesT.fingerprint, n.fingerprint)).get()
         if (!nodeRow) continue
-        this.deps.db.run(
-          'INSERT INTO node_sources (node_id, subscription_id, name_in_sub, first_seen_at, last_seen_at) VALUES (?,?,?,?,?) ON CONFLICT(node_id, subscription_id) DO UPDATE SET name_in_sub=excluded.name_in_sub, last_seen_at=excluded.last_seen_at',
-          [nodeRow.id, sub.id, byFingerprint.get(n.fingerprint)?.name ?? n.name, now, now],
-        )
+        this.deps.db
+          .insert(nodeSources)
+          .values({
+            node_id: nodeRow.id,
+            subscription_id: sub.id,
+            name_in_sub: byFingerprint.get(n.fingerprint)?.name ?? n.name,
+            first_seen_at: now,
+            last_seen_at: now,
+          })
+          .onConflictDoUpdate({
+            target: [nodeSources.node_id, nodeSources.subscription_id],
+            set: { name_in_sub: sql`excluded.name_in_sub`, last_seen_at: sql`excluded.last_seen_at` },
+          })
+          .run()
       }
-    })
-
-    const removed = this.deps.db.get<{ n: number }>(
-      'SELECT COUNT(*) AS n FROM node_sources WHERE subscription_id = ?',
-      [sub.id],
+      },
+      { behavior: 'immediate' }
     )
+
+    const removed = this.deps.db
+      .select({ n: count() })
+      .from(nodeSources)
+      .where(eq(nodeSources.subscription_id, sub.id))
+      .get()
     void removed
-    const missingNow = this.deps.db.get<{ n: number }>(
-      'SELECT COUNT(*) AS n FROM nodes WHERE missing_since >= ? AND missing_since <= ?',
-      [now - 50, now + 50],
-    )?.n ?? 0
+    const missingNow =
+      this.deps.db
+        .select({ n: count() })
+        .from(nodesT)
+        .where(and(gte(nodesT.missing_since, now - 50), lte(nodesT.missing_since, now + 50)))
+        .get()?.n ?? 0
     return { added, changed, removed: missingNow, restored, unsupported }
   }
 
   private ensureCredential(nodeId: string): void {
-    const existing = this.deps.db.get('SELECT node_id FROM node_credentials WHERE node_id = ?', [nodeId])
+    const existing = this.deps.db
+      .select({ node_id: nodeCredentials.node_id })
+      .from(nodeCredentials)
+      .where(eq(nodeCredentials.node_id, nodeId))
+      .get()
     if (existing) return
     const password = generateNodePassword()
-    this.deps.db.run(
-      'INSERT INTO node_credentials (node_id, username, password_enc, password_lookup_hash, created_at) VALUES (?,?,?,?,?)',
-      [nodeId, nodeId, encryptSecret(password), passwordLookupHash(password), Date.now()],
-    )
+    this.deps.db
+      .insert(nodeCredentials)
+      .values({
+        node_id: nodeId,
+        username: nodeId,
+        password_enc: encryptSecret(password),
+        password_lookup_hash: passwordLookupHash(password),
+        created_at: Date.now(),
+      })
+      .run()
   }
 
   private allocateId(name: string): string {
-    const existing = new Set(this.deps.db.all<{ id: string }>('SELECT id FROM nodes').map((r) => r.id.toLowerCase()))
+    const existing = new Set(this.deps.db.select({ id: nodesT.id }).from(nodesT).all().map((r) => r.id.toLowerCase()))
     const region = regionKey(name)
     let seq = 1
     while (true) {
@@ -442,20 +512,30 @@ export class SyncService {
     started: number,
     fetchInfo?: { httpStatus: number; bytes: number },
   ): void {
-    this.deps.db.run('UPDATE subscription_runs SET status=?, finished_at=?, http_status=?, bytes=?, duration_ms=?, error_kind=?, error_msg=? WHERE id=?', [
-      'failed',
-      Date.now(),
-      fetchInfo?.httpStatus ?? null,
-      fetchInfo?.bytes ?? null,
-      Date.now() - started,
-      errorKind,
-      errorMsg.slice(0, 500),
-      runId,
-    ])
-    this.deps.db.run(
-      'UPDATE subscriptions SET last_status=?, last_error=?, last_error_kind=?, consecutive_failures=consecutive_failures+1, updated_at=? WHERE id=?',
-      ['failed', errorMsg.slice(0, 500), errorKind, Date.now(), sub.id],
-    )
+    this.deps.db
+      .update(subscriptionRuns)
+      .set({
+        status: 'failed',
+        finished_at: Date.now(),
+        http_status: fetchInfo?.httpStatus ?? null,
+        bytes: fetchInfo?.bytes ?? null,
+        duration_ms: Date.now() - started,
+        error_kind: errorKind,
+        error_msg: errorMsg.slice(0, 500),
+      })
+      .where(eq(subscriptionRuns.id, runId))
+      .run()
+    this.deps.db
+      .update(subscriptions)
+      .set({
+        last_status: 'failed',
+        last_error: errorMsg.slice(0, 500),
+        last_error_kind: errorKind,
+        consecutive_failures: sql`${subscriptions.consecutive_failures} + 1`,
+        updated_at: Date.now(),
+      })
+      .where(eq(subscriptions.id, sub.id))
+      .run()
     if (sub.consecutive_failures + 1 >= 3) {
       this.deps.events.warn('sync.repeated_failure', '订阅「' + sub.name + '」连续失败 ' + (sub.consecutive_failures + 1) + ' 次', { subscriptionId: sub.id })
     }
@@ -463,31 +543,38 @@ export class SyncService {
 
   private insertRunErrors(runId: string, errors: { lineNo: number; rawSnippet: string; errorKind: string; errorMsg: string }[]): void {
     for (const e of errors.slice(0, 100)) {
-      this.deps.db.run('INSERT INTO subscription_run_errors (run_id, line_no, raw_snippet, error_kind, error_msg) VALUES (?,?,?,?,?)', [
-        runId,
-        e.lineNo,
-        (e.rawSnippet ?? '').slice(0, 300),
-        e.errorKind,
-        (e.errorMsg ?? '').slice(0, 300),
-      ])
+      this.deps.db
+        .insert(subscriptionRunErrors)
+        .values({
+          run_id: runId,
+          line_no: e.lineNo,
+          raw_snippet: (e.rawSnippet ?? '').slice(0, 300),
+          error_kind: e.errorKind,
+          error_msg: (e.errorMsg ?? '').slice(0, 300),
+        })
+        .run()
     }
   }
 
   private trimRuns(subscriptionId: string): void {
     const keep = this.deps.settings.get().subsync.historyKeep
+    // drizzle 只写 OFFSET 不写 LIMIT，SQLite 会语法错；这里是单条语句，用 raw 保留 LIMIT -1 OFFSET 语义
     const rows = this.deps.db.all<{ id: string }>(
-      'SELECT id FROM subscription_runs WHERE subscription_id = ? ORDER BY started_at DESC LIMIT -1 OFFSET ?',
-      [subscriptionId, keep],
+      sql`SELECT id FROM subscription_runs WHERE subscription_id = ${subscriptionId} ORDER BY started_at DESC LIMIT -1 OFFSET ${keep}`
     )
     for (const r of rows) {
-      this.deps.db.run('DELETE FROM subscription_run_errors WHERE run_id = ?', [r.id])
-      this.deps.db.run('DELETE FROM subscription_runs WHERE id = ?', [r.id])
+      this.deps.db.delete(subscriptionRunErrors).where(eq(subscriptionRunErrors.run_id, r.id)).run()
+      this.deps.db.delete(subscriptionRuns).where(eq(subscriptionRuns.id, r.id)).run()
     }
   }
 
   /** 密码明文（供面板展示与网关校验） */
   credentialOf(nodeId: string): { username: string; password: string } | null {
-    const row = this.deps.db.get<{ username: string; password_enc: string }>('SELECT username, password_enc FROM node_credentials WHERE node_id = ?', [nodeId])
+    const row = this.deps.db
+      .select({ username: nodeCredentials.username, password_enc: nodeCredentials.password_enc })
+      .from(nodeCredentials)
+      .where(eq(nodeCredentials.node_id, nodeId))
+      .get()
     if (!row) return null
     try {
       return { username: row.username, password: decryptSecret(row.password_enc) }
@@ -500,23 +587,33 @@ export class SyncService {
   /** 轮换密码：网关立即生效（D4） */
   rotate(nodeId: string): { username: string; password: string } {
     const password = generateNodePassword()
-    const existing = this.deps.db.get('SELECT node_id FROM node_credentials WHERE node_id = ?', [nodeId])
+    const existing = this.deps.db
+      .select({ node_id: nodeCredentials.node_id })
+      .from(nodeCredentials)
+      .where(eq(nodeCredentials.node_id, nodeId))
+      .get()
     if (!existing) {
-      this.deps.db.run('INSERT INTO node_credentials (node_id, username, password_enc, password_lookup_hash, created_at, rotated_at) VALUES (?,?,?,?,?,?)', [
-        nodeId,
-        nodeId,
-        encryptSecret(password),
-        passwordLookupHash(password),
-        Date.now(),
-        Date.now(),
-      ])
+      this.deps.db
+        .insert(nodeCredentials)
+        .values({
+          node_id: nodeId,
+          username: nodeId,
+          password_enc: encryptSecret(password),
+          password_lookup_hash: passwordLookupHash(password),
+          created_at: Date.now(),
+          rotated_at: Date.now(),
+        })
+        .run()
     } else {
-      this.deps.db.run('UPDATE node_credentials SET password_enc=?, password_lookup_hash=?, rotated_at=? WHERE node_id=?', [
-        encryptSecret(password),
-        passwordLookupHash(password),
-        Date.now(),
-        nodeId,
-      ])
+      this.deps.db
+        .update(nodeCredentials)
+        .set({
+          password_enc: encryptSecret(password),
+          password_lookup_hash: passwordLookupHash(password),
+          rotated_at: Date.now(),
+        })
+        .where(eq(nodeCredentials.node_id, nodeId))
+        .run()
     }
     this.deps.events.info('credential.rotated', '节点 ' + nodeId + ' 凭据已轮换（网关立即生效）', { nodeId })
     return { username: nodeId, password }

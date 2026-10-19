@@ -1,4 +1,6 @@
+import { and, asc, count, eq } from 'drizzle-orm'
 import type { Db } from '../core/db'
+import { nodeCredentials, nodeStatus, nodes } from '../core/schema'
 import type { SettingsStore } from '../core/settings'
 import { sha1Hex } from '../core/crypto'
 import { stableStringify } from '../core/ids'
@@ -52,16 +54,26 @@ export function buildDesiredNodes(
   const s = settings.get()
   const policy = s.publish.policy
 
-  const rows = db.all<NodeRow>(
-    `SELECT n.id, n.display_name, n.protocol, n.protocol_supported, n.enabled, n.outbound_json,
-            n.missing_since, n.stale_until, n.publish_policy_override,
-            st.state, c.username
-       FROM nodes n
-       LEFT JOIN node_status st ON st.node_id = n.id
-       LEFT JOIN node_credentials c ON c.node_id = n.id
-      WHERE n.enabled = 1 AND n.protocol_supported = 1 AND n.is_virtual = 0
-      ORDER BY n.id ASC`,
-  )
+  const rows: NodeRow[] = db
+    .select({
+      id: nodes.id,
+      display_name: nodes.display_name,
+      protocol: nodes.protocol,
+      protocol_supported: nodes.protocol_supported,
+      enabled: nodes.enabled,
+      outbound_json: nodes.outbound_json,
+      missing_since: nodes.missing_since,
+      stale_until: nodes.stale_until,
+      publish_policy_override: nodes.publish_policy_override,
+      state: nodeStatus.state,
+      username: nodeCredentials.username,
+    })
+    .from(nodes)
+    .leftJoin(nodeStatus, eq(nodeStatus.node_id, nodes.id))
+    .leftJoin(nodeCredentials, eq(nodeCredentials.node_id, nodes.id))
+    .where(and(eq(nodes.enabled, 1), eq(nodes.protocol_supported, 1), eq(nodes.is_virtual, 0)))
+    .orderBy(asc(nodes.id))
+    .all()
 
   const desired: DesiredNode[] = []
   const errors: { nodeId: string; message: string }[] = []
@@ -111,7 +123,7 @@ export function buildDesiredNodes(
     )
   }
 
-  const unsupported = db.get<{ n: number }>('SELECT COUNT(*) AS n FROM nodes WHERE protocol_supported = 0')?.n ?? 0
+  const unsupported = db.select({ n: count() }).from(nodes).where(eq(nodes.protocol_supported, 0)).get()?.n ?? 0
   return {
     desired,
     included: desired.length,

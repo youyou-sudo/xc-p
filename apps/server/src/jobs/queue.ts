@@ -1,4 +1,6 @@
+import { and, count, desc, eq, inArray } from 'drizzle-orm'
 import type { Db } from '../core/db'
+import { jobs } from '../core/schema'
 import type { EventBus } from '../core/events'
 import { jobId as newJobId } from '../core/ids'
 import { logger } from '../core/log'
@@ -35,23 +37,31 @@ export class JobQueue {
 
   create(kind: JobKind, payload: unknown, createdBy = 'system', priority = 0): string {
     const id = newJobId(kind)
-    this.db.run(
-      'INSERT INTO jobs (id, kind, status, priority, payload_json, progress, total, message, created_by, created_at) VALUES (?,?,?,?,?,0,0,NULL,?,?)',
-      [id, kind, 'queued', priority, payload === undefined ? null : JSON.stringify(payload), createdBy, Date.now()],
-    )
+    this.db
+      .insert(jobs)
+      .values({
+        id,
+        kind,
+        status: 'queued',
+        priority,
+        payload_json: payload === undefined ? null : JSON.stringify(payload),
+        progress: 0,
+        total: 0,
+        message: null,
+        created_by: createdBy,
+        created_at: Date.now(),
+      })
+      .run()
     return id
   }
 
   get(id: string): JobRow | undefined {
-    return this.db.get<JobRow>('SELECT * FROM jobs WHERE id = ?', [id])
+    return this.db.select().from(jobs).where(eq(jobs.id, id)).get() as JobRow | undefined
   }
 
   update(id: string, patch: Partial<Pick<JobRow, 'status' | 'progress' | 'total' | 'message' | 'started_at' | 'finished_at' | 'result_json' | 'error'>>): void {
-    const keys = Object.keys(patch)
-    if (keys.length === 0) return
-    const sets = keys.map((k) => k + ' = ?').join(', ')
-    const values = keys.map((k) => (patch as any)[k])
-    this.db.run('UPDATE jobs SET ' + sets + ' WHERE id = ?', [...values, id])
+    if (Object.keys(patch).length === 0) return
+    this.db.update(jobs).set(patch).where(eq(jobs.id, id)).run()
     if (patch.status === 'running' || patch.status === 'ok' || patch.status === 'failed' || patch.progress !== undefined) {
       this.events.emit({
         level: patch.status === 'failed' ? 'error' : 'info',
@@ -84,31 +94,29 @@ export class JobQueue {
   }
 
   list(opts: { status?: string; kind?: string; limit?: number; offset?: number } = {}): { items: JobRow[]; total: number } {
-    const where: string[] = []
-    const params: (string | number)[] = []
-    if (opts.status) {
-      where.push('status = ?')
-      params.push(opts.status)
-    }
-    if (opts.kind) {
-      where.push('kind = ?')
-      params.push(opts.kind)
-    }
-    const clause = where.length ? ' WHERE ' + where.join(' AND ') : ''
-    const total = this.db.get<{ n: number }>('SELECT COUNT(*) AS n FROM jobs' + clause, params)?.n ?? 0
-    const items = this.db.all<JobRow>(
-      'SELECT * FROM jobs' + clause + ' ORDER BY created_at DESC LIMIT ? OFFSET ?',
-      [...params, opts.limit ?? 50, opts.offset ?? 0],
-    )
+    const conds = []
+    if (opts.status) conds.push(eq(jobs.status, opts.status))
+    if (opts.kind) conds.push(eq(jobs.kind, opts.kind))
+    const where = conds.length ? and(...conds) : undefined
+    const total = this.db.select({ n: count() }).from(jobs).where(where).get()?.n ?? 0
+    const items = this.db
+      .select()
+      .from(jobs)
+      .where(where)
+      .orderBy(desc(jobs.created_at))
+      .limit(opts.limit ?? 50)
+      .offset(opts.offset ?? 0)
+      .all() as JobRow[]
     return { items, total }
   }
 
   /** 进程重启后把 running 的僵尸任务标记为 failed(interrupted)（§13） */
   markZombies(): number {
-    const r = this.db.run(
-      "UPDATE jobs SET status = 'failed', finished_at = ?, error = 'interrupted' WHERE status IN ('running','queued')",
-      [Date.now()],
-    )
+    const r = this.db
+      .update(jobs)
+      .set({ status: 'failed', finished_at: Date.now(), error: 'interrupted' })
+      .where(inArray(jobs.status, ['running', 'queued']))
+      .run()
     if (r.changes > 0) logger.warn('marked ' + r.changes + ' interrupted jobs as failed')
     return r.changes
   }

@@ -1,4 +1,6 @@
+import { and, desc, eq, inArray, ne } from 'drizzle-orm'
 import type { Db } from '../core/db'
+import { nodes as nodesT, revisionNodes, runtimeRevisions } from '../core/schema'
 import type { EventBus } from '../core/events'
 import type { SettingsStore } from '../core/settings'
 import type { RoutingTable } from '../core/routing'
@@ -148,7 +150,11 @@ export class Publisher {
         const single = await this.testOutbounds([node.outbound])
         if (!single.ok) {
           failed.push({ nodeId: node.nodeId, message: (single.stderr || single.stdout).slice(0, 300) })
-          this.deps.db.run('UPDATE nodes SET publish_error = ?, updated_at = ? WHERE id = ?', [single.stderr.slice(0, 300), Date.now(), node.nodeId])
+          this.deps.db
+            .update(nodesT)
+            .set({ publish_error: single.stderr.slice(0, 300), updated_at: Date.now() })
+            .where(eq(nodesT.id, node.nodeId))
+            .run()
         }
       }
     }
@@ -219,10 +225,24 @@ export class Publisher {
     }
 
     if (!validation.ok) {
-      this.deps.db.run(
-        'INSERT INTO runtime_revisions (id, status, reason, created_at, node_count, added_count, removed_count, changed_count, skipped_count, plan_digest, plan_json, validation_json, error) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)',
-        [revId, 'failed', opts.reason, startRow.created, startRow.nodeCount, summary.add, summary.remove, summary.change, startRow.skipped, startRow.planDigest, startRow.planJson, startRow.validationJson, '安全阀/构建校验未通过'],
-      )
+      this.deps.db
+        .insert(runtimeRevisions)
+        .values({
+          id: revId,
+          status: 'failed',
+          reason: opts.reason,
+          created_at: startRow.created,
+          node_count: startRow.nodeCount,
+          added_count: summary.add,
+          removed_count: summary.remove,
+          changed_count: summary.change,
+          skipped_count: startRow.skipped,
+          plan_digest: startRow.planDigest,
+          plan_json: startRow.planJson,
+          validation_json: startRow.validationJson,
+          error: '安全阀/构建校验未通过',
+        })
+        .run()
       this.deps.events.error('publish.aborted', '发布被安全阀拦下，数据面未做任何改动', { revisionId: revId })
       return { ok: false, revisionId: revId, dryRun: false, reason: opts.reason, summary, plan, validation, error: '安全阀/构建校验未通过' }
     }
@@ -237,22 +257,39 @@ export class Publisher {
     }
 
     const before = await this.deps.reconciler.readDataplane('publish')
-    this.deps.db.run(
-      'INSERT INTO runtime_revisions (id, status, reason, created_at, node_count, added_count, removed_count, changed_count, skipped_count, plan_digest, plan_json, validation_json, dataplane_before_json) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)',
-      [revId, 'applying', opts.reason, startRow.created, startRow.nodeCount, summary.add, summary.remove, summary.change, startRow.skipped, startRow.planDigest, startRow.planJson, startRow.validationJson, JSON.stringify(before)],
-    )
+    this.deps.db
+      .insert(runtimeRevisions)
+      .values({
+        id: revId,
+        status: 'applying',
+        reason: opts.reason,
+        created_at: startRow.created,
+        node_count: startRow.nodeCount,
+        added_count: summary.add,
+        removed_count: summary.remove,
+        changed_count: summary.change,
+        skipped_count: startRow.skipped,
+        plan_digest: startRow.planDigest,
+        plan_json: startRow.planJson,
+        validation_json: startRow.validationJson,
+        dataplane_before_json: JSON.stringify(before),
+      })
+      .run()
 
     const t0 = Date.now()
     const result = await this.deps.engine.applyPlan(plan, revId)
     const duration = Date.now() - t0
 
     if (!result.ok) {
-      this.deps.db.run('UPDATE runtime_revisions SET status = ?, error = ?, applied_at = ? WHERE id = ?', [
-        result.rolledBack ? 'rolled_back' : 'failed',
-        result.error?.message ?? 'unknown',
-        Date.now(),
-        revId,
-      ])
+      this.deps.db
+        .update(runtimeRevisions)
+        .set({
+          status: result.rolledBack ? 'rolled_back' : 'failed',
+          error: result.error?.message ?? 'unknown',
+          applied_at: Date.now(),
+        })
+        .where(eq(runtimeRevisions.id, revId))
+        .run()
       this.deps.events.error('publish.failed', '发布失败：' + (result.error?.message ?? '') + '（第 ' + (result.error?.step ?? 0) + ' 步）', { revisionId: revId })
       return { ok: false, revisionId: revId, dryRun: false, reason: opts.reason, summary, plan, validation, error: result.error?.message, rolledBack: result.rolledBack }
     }
@@ -260,10 +297,26 @@ export class Publisher {
     // 落 revision_nodes + 完整配置产物
     const tx = () => {
       for (const n of desired.desired) {
-        this.deps.db.run(
-          'INSERT OR REPLACE INTO revision_nodes (revision_id, node_id, username, outbound_tag, inbound_tag, inbound_port) VALUES (?,?,?,?,?,?)',
-          [revId, n.nodeId, n.username, n.outboundTag, n.inboundTag, n.inboundPort],
-        )
+        this.deps.db
+          .insert(revisionNodes)
+          .values({
+            revision_id: revId,
+            node_id: n.nodeId,
+            username: n.username,
+            outbound_tag: n.outboundTag,
+            inbound_tag: n.inboundTag,
+            inbound_port: n.inboundPort,
+          })
+          .onConflictDoUpdate({
+            target: [revisionNodes.revision_id, revisionNodes.node_id],
+            set: {
+              username: n.username,
+              outbound_tag: n.outboundTag,
+              inbound_tag: n.inboundTag,
+              inbound_port: n.inboundPort,
+            },
+          })
+          .run()
       }
     }
     tx()
@@ -272,16 +325,28 @@ export class Publisher {
     try {
       const check = await this.deps.reconciler.verifyAfterPublish(desired.desired, revId)
       verified = { ok: check.ok }
-      this.deps.db.run('UPDATE runtime_revisions SET dataplane_after_json = ? WHERE id = ?', [JSON.stringify(check.snapshot), revId])
+      this.deps.db
+        .update(runtimeRevisions)
+        .set({ dataplane_after_json: JSON.stringify(check.snapshot) })
+        .where(eq(runtimeRevisions.id, revId))
+        .run()
     } catch (e) {
       verified = { ok: false }
       void e
     }
 
     const status = verified.ok ? 'active' : 'failed'
-    this.deps.db.run('UPDATE runtime_revisions SET status = ?, applied_at = ? WHERE id = ?', [status, Date.now(), revId])
+    this.deps.db
+      .update(runtimeRevisions)
+      .set({ status, applied_at: Date.now() })
+      .where(eq(runtimeRevisions.id, revId))
+      .run()
     if (status === 'active') {
-      this.deps.db.run("UPDATE runtime_revisions SET status = 'retired', retired_at = ? WHERE status = 'active' AND id != ?", [Date.now(), revId])
+      this.deps.db
+        .update(runtimeRevisions)
+        .set({ status: 'retired', retired_at: Date.now() })
+        .where(and(eq(runtimeRevisions.status, 'active'), ne(runtimeRevisions.id, revId)))
+        .run()
     }
 
     // 写本次发布的完整配置快照（产物，可用于灾备重建，§14.1）
@@ -322,9 +387,14 @@ export class Publisher {
 
   /** 回滚到指定 revision：把它的目标状态当作期望状态，走同一套 ApplyPlan（§9.3） */
   async rollback(targetRevisionId: string, actor = 'panel'): Promise<PublishResult> {
-    const row = this.deps.db.get<{ plan_json: string; id: string }>('SELECT plan_json, id FROM runtime_revisions WHERE id = ?', [targetRevisionId])
+    const row = this.deps.db
+      .select({ plan_json: runtimeRevisions.plan_json, id: runtimeRevisions.id })
+      .from(runtimeRevisions)
+      .where(eq(runtimeRevisions.id, targetRevisionId))
+      .get()
     if (!row) throw new Error('revision 不存在: ' + targetRevisionId)
-    const saved = JSON.parse(row.plan_json) as { desired: DesiredNode[] }
+    // plan_json 在 insert 时总是写入（见上方 publish/rollback 两条插入路径）
+    const saved = JSON.parse(row.plan_json!) as { desired: DesiredNode[] }
     const targetDesired = saved.desired ?? []
     const applied = this.appliedNodes()
     const snapshot = await this.deps.reconciler.readDataplane('reconcile')
@@ -332,14 +402,29 @@ export class Publisher {
     const summary = planSummary(plan)
     const revId = newRevisionId()
 
-    this.deps.db.run(
-      'INSERT INTO runtime_revisions (id, status, reason, created_at, node_count, added_count, removed_count, changed_count, plan_digest, plan_json) VALUES (?,?,?,?,?,?,?,?,?,?)',
-      [revId, 'applying', 'rollback', Date.now(), targetDesired.length, summary.add, summary.remove, summary.change, planDigest(plan), JSON.stringify({ summary, desired: targetDesired, target: targetRevisionId })],
-    )
+    this.deps.db
+      .insert(runtimeRevisions)
+      .values({
+        id: revId,
+        status: 'applying',
+        reason: 'rollback',
+        created_at: Date.now(),
+        node_count: targetDesired.length,
+        added_count: summary.add,
+        removed_count: summary.remove,
+        changed_count: summary.change,
+        plan_digest: planDigest(plan),
+        plan_json: JSON.stringify({ summary, desired: targetDesired, target: targetRevisionId }),
+      })
+      .run()
 
     const result = await this.deps.engine.applyPlan(plan, revId)
     if (!result.ok) {
-      this.deps.db.run('UPDATE runtime_revisions SET status = ?, error = ? WHERE id = ?', ['failed', result.error?.message ?? 'unknown', revId])
+      this.deps.db
+        .update(runtimeRevisions)
+        .set({ status: 'failed', error: result.error?.message ?? 'unknown' })
+        .where(eq(runtimeRevisions.id, revId))
+        .run()
       this.deps.events.error('publish.rollback_failed', '回滚失败：' + (result.error?.message ?? ''), { revisionId: revId })
       return {
         ok: false,
@@ -352,7 +437,11 @@ export class Publisher {
         error: result.error?.message,
       }
     }
-    this.deps.db.run('UPDATE runtime_revisions SET status = ?, applied_at = ? WHERE id = ?', ['active', Date.now(), revId])
+    this.deps.db
+      .update(runtimeRevisions)
+      .set({ status: 'active', applied_at: Date.now() })
+      .where(eq(runtimeRevisions.id, revId))
+      .run()
     this.deps.events.info('publish.rolled_back', '已回滚到 revision ' + targetRevisionId, { revisionId: revId })
     void actor
     return {
@@ -368,18 +457,27 @@ export class Publisher {
  
   private trimRevisions(): void {
     const keep = this.deps.settings.get().publish.keepRevisions
-    const rows = this.deps.db.all<{ id: string }>(
-      "SELECT id FROM runtime_revisions WHERE status IN ('retired','failed','rolled_back') ORDER BY created_at DESC",
-    )
+    const rows = this.deps.db
+      .select({ id: runtimeRevisions.id })
+      .from(runtimeRevisions)
+      .where(inArray(runtimeRevisions.status, ['retired', 'failed', 'rolled_back']))
+      .orderBy(desc(runtimeRevisions.created_at))
+      .all()
     const extra = rows.slice(keep)
     for (const r of extra) {
-      this.deps.db.run('DELETE FROM revision_nodes WHERE revision_id = ?', [r.id])
-      this.deps.db.run('DELETE FROM runtime_revisions WHERE id = ?', [r.id])
+      this.deps.db.delete(revisionNodes).where(eq(revisionNodes.revision_id, r.id)).run()
+      this.deps.db.delete(runtimeRevisions).where(eq(runtimeRevisions.id, r.id)).run()
     }
   }
 
   currentStatus() {
-    const active = this.deps.db.get<any>("SELECT * FROM runtime_revisions WHERE status = 'active' ORDER BY created_at DESC LIMIT 1")
+    const active = this.deps.db
+      .select()
+      .from(runtimeRevisions)
+      .where(eq(runtimeRevisions.status, 'active'))
+      .orderBy(desc(runtimeRevisions.created_at))
+      .limit(1)
+      .get()
     const applied = this.appliedNodes()
     return {
       revision: active

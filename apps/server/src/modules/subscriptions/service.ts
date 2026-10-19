@@ -1,4 +1,5 @@
 import type { AppContext } from '../../context'
+import { nodes as nodesT } from '../../core/schema'
 import { Semaphore } from '../../detect/detect'
 import type { SubFormatHint } from '../../sub/types'
 
@@ -39,7 +40,7 @@ export function createSubscriptionsService(ctx: AppContext) {
 
   /** 预览解析结果与现有节点的差异。 */
   const previewDiff = (nodes: { fingerprint: string; protocolSupported: boolean }[]) => {
-    const existing = new Set(ctx.db.all<{ fingerprint: string }>('SELECT fingerprint FROM nodes').map((r) => r.fingerprint))
+    const existing = new Set(ctx.db.select({ fingerprint: nodesT.fingerprint }).from(nodesT).all().map((r) => r.fingerprint))
     const incoming = new Set(nodes.map((n) => n.fingerprint))
     return {
       added: nodes.filter((n) => !existing.has(n.fingerprint)).length,

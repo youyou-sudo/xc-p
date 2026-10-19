@@ -2,7 +2,9 @@ import { afterEach, describe, expect, test } from 'bun:test'
 import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { Db } from '../src/core/db'
+import { desc } from 'drizzle-orm'
+import { openDb, type Db } from '../src/core/db'
+import { subscriptions } from '../src/core/schema'
 import { EventBus } from '../src/core/events'
 import { runMigrations } from '../src/core/migrations'
 import { SettingsStore } from '../src/core/settings'
@@ -31,7 +33,7 @@ afterEach(() => {
 
 function setup() {
   const dir = mkdtempSync(join(tmpdir(), 'xcp-sub-controller-'))
-  const db = new Db(join(dir, 'sb.db'))
+  const db = openDb(join(dir, 'sb.db'))
   resources.push({ dir, db })
   runMigrations(db)
   const settings = new SettingsStore(db)
@@ -67,7 +69,12 @@ function patch(app: ReturnType<typeof setup>['app'], path: string, payload: unkn
 }
 
 function intervalOf(db: Db): number | null | undefined {
-  return db.get<{ interval_sec: number | null }>('SELECT interval_sec FROM subscriptions ORDER BY created_at DESC LIMIT 1')?.interval_sec
+  return db
+    .select({ interval_sec: subscriptions.interval_sec })
+    .from(subscriptions)
+    .orderBy(desc(subscriptions.created_at))
+    .limit(1)
+    .get()?.interval_sec
 }
 
 describe('POST /api/subscriptions intervalSec wiring', () => {

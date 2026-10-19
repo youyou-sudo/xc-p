@@ -1,5 +1,7 @@
+import { and, eq, isNotNull, isNull, lt } from 'drizzle-orm'
 import type { Db } from './db'
 import type { EventBus } from './events'
+import { nodeConnections } from './schema'
 
 export interface ActiveConn {
   id: number
@@ -32,10 +34,19 @@ export class ConnectionTracker {
     const conn: ActiveConn = { id, ...info, startedAt: Date.now(), upBytes: 0, downBytes: 0 }
     this.conns.set(id, conn)
     try {
-      this.db.run(
-        'INSERT INTO node_connections (id, node_id, username, client_ip, target, started_at, up_bytes, down_bytes) VALUES (?,?,?,?,?,?,0,0)',
-        [id, info.nodeId, info.username, info.clientIp, info.target, conn.startedAt],
-      )
+      this.db
+        .insert(nodeConnections)
+        .values({
+          id,
+          node_id: info.nodeId,
+          username: info.username,
+          client_ip: info.clientIp,
+          target: info.target,
+          started_at: conn.startedAt,
+          up_bytes: 0,
+          down_bytes: 0,
+        })
+        .run()
     } catch {
       /* 落库失败不影响转发 */
     }
@@ -54,13 +65,11 @@ export class ConnectionTracker {
     this.conns.delete(id)
     if (!c) return
     try {
-      this.db.run('UPDATE node_connections SET closed_at = ?, up_bytes = ?, down_bytes = ?, close_reason = ? WHERE id = ?', [
-        Date.now(),
-        up,
-        down,
-        reason,
-        id,
-      ])
+      this.db
+        .update(nodeConnections)
+        .set({ closed_at: Date.now(), up_bytes: up, down_bytes: down, close_reason: reason })
+        .where(eq(nodeConnections.id, id))
+        .run()
     } catch {
       /* ignore */
     }
@@ -90,7 +99,11 @@ export class ConnectionTracker {
   snapshot(): void {
     for (const c of this.conns.values()) {
       try {
-        this.db.run('UPDATE node_connections SET up_bytes = ?, down_bytes = ? WHERE id = ?', [c.upBytes, c.downBytes, c.id])
+        this.db
+          .update(nodeConnections)
+          .set({ up_bytes: c.upBytes, down_bytes: c.downBytes })
+          .where(eq(nodeConnections.id, c.id))
+          .run()
       } catch {
         /* ignore */
       }
@@ -99,12 +112,19 @@ export class ConnectionTracker {
 
   /** 进程重启后清理悬挂连接（它们是上一次运行的残留） */
   reapOrphans(): number {
-    const r = this.db.run("UPDATE node_connections SET closed_at = ?, close_reason = 'shutdown' WHERE closed_at IS NULL", [Date.now()])
+    const r = this.db
+      .update(nodeConnections)
+      .set({ closed_at: Date.now(), close_reason: 'shutdown' })
+      .where(isNull(nodeConnections.closed_at))
+      .run()
     return r.changes
   }
 
   trimHistory(days = 7): number {
-    const r = this.db.run('DELETE FROM node_connections WHERE closed_at IS NOT NULL AND closed_at < ?', [Date.now() - days * 86400_000])
+    const r = this.db
+      .delete(nodeConnections)
+      .where(and(isNotNull(nodeConnections.closed_at), lt(nodeConnections.closed_at, Date.now() - days * 86400_000)))
+      .run()
     return r.changes
   }
 

@@ -1,5 +1,7 @@
 import { Elysia } from 'elysia'
+import { desc } from 'drizzle-orm'
 import type { AppContext } from '../../context'
+import { nodeConnections } from '../../core/schema'
 import type { createSessionPlugin } from '../../plugins/session'
 import { gatewayKickBody } from './model'
 
@@ -15,7 +17,7 @@ export function gatewayModule(ctx: AppContext, session: SessionPlugin) {
       byNode: conns.byNode(),
       byIp: conns.byIp(),
       stats: ctx.gateway ? ctx.gateway.stats() : null,
-      recent: db.all('SELECT * FROM node_connections ORDER BY started_at DESC LIMIT 100'),
+      recent: db.select().from(nodeConnections).orderBy(desc(nodeConnections.started_at)).limit(100).all(),
     }), { requireSession: true })
     .post(
       '/gateway/kick',

@@ -1,5 +1,7 @@
 import { Elysia } from 'elysia'
+import { and, count, eq } from 'drizzle-orm'
 import type { AppContext } from '../../context'
+import { nodes as nodesT } from '../../core/schema'
 import { hasScope } from '../auth/service'
 import { decryptSecret } from '../../core/crypto'
 import { AppError } from '../../core/errors'
@@ -26,7 +28,12 @@ export function v1Module(ctx: AppContext, subscriptions: SubscriptionsService) {
       if (a.error) return a.error
       if (!hasScope(a.principal!, 'read')) return forbiddenResponse('read')
       const gw = ctx.gatewayInfo()
-      const nodeCount = db.get<{ n: number }>('SELECT COUNT(*) AS n FROM nodes WHERE enabled = 1 AND protocol_supported = 1')?.n ?? 0
+      const nodeCount =
+        db
+          .select({ n: count() })
+          .from(nodesT)
+          .where(and(eq(nodesT.enabled, 1), eq(nodesT.protocol_supported, 1)))
+          .get()?.n ?? 0
       return {
         host: settings.get().panel.baseUrl || 'xc-p',
         port: gw.port,

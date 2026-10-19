@@ -8,6 +8,7 @@ import type { ApplyEngine } from './apply'
 import { diffTags } from './apply'
 import type { AppliedNode, ApplyPlan, DataplaneSnapshot, DesiredNode } from './plan'
 import { computePlan, planDigest, planSummary } from './plan'
+import { dataplaneState } from '../core/schema'
 
 export interface ReconcileDeps {
   db: Db
@@ -52,10 +53,17 @@ export class Reconciler {
       logger.warn('lsrules 在当前 xray 构建中不可用：规则集合退化为「按已成功执行的 apply 审计推导」，仅校验 outbound/inbound')
     }
     try {
-      this.deps.db.run(
-        'INSERT INTO dataplane_state (at, source, outbounds_json, inbounds_json, rules_json, digest) VALUES (?,?,?,?,?,?)',
-        [snapshot.at, source, JSON.stringify(snapshot.outbounds), JSON.stringify(snapshot.inbounds), JSON.stringify(snapshot.rules), snapshot.digest],
-      )
+      this.deps.db
+        .insert(dataplaneState)
+        .values({
+          at: snapshot.at,
+          source: source,
+          outbounds_json: JSON.stringify(snapshot.outbounds),
+          inbounds_json: JSON.stringify(snapshot.inbounds),
+          rules_json: JSON.stringify(snapshot.rules),
+          digest: snapshot.digest,
+        })
+        .run()
     } catch {
       /* 快照落库失败不阻断对账 */
     }

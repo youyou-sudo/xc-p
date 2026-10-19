@@ -1,5 +1,7 @@
+import { count, desc, notInArray } from 'drizzle-orm'
 import type { Db } from './db'
 import { digestOf } from './ids'
+import { gatewayRoutes } from './schema'
 
 export interface RouteEntry { nodeId: string; port: number; username: string; tag?: string }
 
@@ -61,20 +63,32 @@ export class RoutingTable {
   persist(): void {
     if (!this.db) return
     const entries = this.snapshot()
-    this.db.run('INSERT INTO gateway_routes (updated_at, table_json, digest) VALUES (?,?,?)', [
-      Date.now(),
-      JSON.stringify(entries),
-      digestOf(entries),
-    ])
-    const keep = this.db.get<{ n: number }>('SELECT COUNT(*) AS n FROM gateway_routes')
+    this.db
+      .insert(gatewayRoutes)
+      .values({ updated_at: Date.now(), table_json: JSON.stringify(entries), digest: digestOf(entries) })
+      .run()
+    const keep = this.db.select({ n: count() }).from(gatewayRoutes).get()
     if ((keep?.n ?? 0) > 20) {
-      this.db.run('DELETE FROM gateway_routes WHERE id NOT IN (SELECT id FROM gateway_routes ORDER BY id DESC LIMIT 20)')
+      this.db
+        .delete(gatewayRoutes)
+        .where(
+          notInArray(
+            gatewayRoutes.id,
+            this.db.select({ id: gatewayRoutes.id }).from(gatewayRoutes).orderBy(desc(gatewayRoutes.id)).limit(20)
+          )
+        )
+        .run()
     }
   }
 
   restoreFromDb(): number {
     if (!this.db) return 0
-    const row = this.db.get<{ table_json: string }>('SELECT table_json FROM gateway_routes ORDER BY id DESC LIMIT 1')
+    const row = this.db
+      .select({ table_json: gatewayRoutes.table_json })
+      .from(gatewayRoutes)
+      .orderBy(desc(gatewayRoutes.id))
+      .limit(1)
+      .get()
     if (!row) return 0
     try {
       const entries = JSON.parse(row.table_json) as RouteEntry[]

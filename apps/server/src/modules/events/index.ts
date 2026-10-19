@@ -1,4 +1,6 @@
 import { Elysia } from 'elysia'
+import { and, desc, eq, like } from 'drizzle-orm'
+import { auditLog, events as eventsTable, xrayApplyOps } from '../../core/schema'
 import type { AppContext } from '../../context'
 import { parsePaging, requestId } from '../../core/http'
 import { sessionOf, type createSessionPlugin } from '../../plugins/session'
@@ -9,29 +11,31 @@ type SessionPlugin = ReturnType<typeof createSessionPlugin>
 export function eventsModule(ctx: AppContext, session: SessionPlugin) {
   const { db, events, conns, auth } = ctx
   const listApplyOps = (limit: number, offset: number) => ({
-    items: db.all<any>('SELECT * FROM xray_apply_ops ORDER BY at DESC LIMIT ? OFFSET ?', [limit, offset]),
+    items: db
+      .select()
+      .from(xrayApplyOps)
+      .orderBy(desc(xrayApplyOps.at))
+      .limit(limit)
+      .offset(offset)
+      .all(),
   })
   return new Elysia({ name: 'api/events', prefix: '/api' })
     .use(session)
     .get('/events', ({ query }) => {
       const q = query
       const p = parsePaging(q)
-      const where: string[] = []
-      const params: any[] = []
-      if (q.level) {
-        where.push('level = ?')
-        params.push(q.level)
-      }
-      if (q.kind) {
-        where.push('kind LIKE ?')
-        params.push(q.kind + '%')
-      }
-      if (q.nodeId) {
-        where.push('node_id = ?')
-        params.push(q.nodeId)
-      }
-      const clause = where.length ? ' WHERE ' + where.join(' AND ') : ''
-      const items = db.all<any>('SELECT * FROM events' + clause + ' ORDER BY at DESC LIMIT ? OFFSET ?', [...params, p.limit, p.offset])
+      const conds = []
+      if (q.level) conds.push(eq(eventsTable.level, q.level))
+      if (q.kind) conds.push(like(eventsTable.kind, q.kind + '%'))
+      if (q.nodeId) conds.push(eq(eventsTable.node_id, q.nodeId))
+      const items = db
+        .select()
+        .from(eventsTable)
+        .where(conds.length ? and(...conds) : undefined)
+        .orderBy(desc(eventsTable.at))
+        .limit(p.limit)
+        .offset(p.offset)
+        .all()
       return { items: items.map((e) => ({ ...e, detail: e.detail_json ? JSON.parse(e.detail_json) : null })) }
     }, { requireSession: true })
     /** 审计明细（/events 页的「xray_apply_ops 审计」标签页）；kind=xray_apply_ops 时等价于 /api/apply-ops */
@@ -39,7 +43,13 @@ export function eventsModule(ctx: AppContext, session: SessionPlugin) {
       const q = query
       const p = parsePaging(q)
       if (q.kind === 'xray_apply_ops') return listApplyOps(p.limit, p.offset)
-      const items = db.all<any>('SELECT * FROM audit_log ORDER BY at DESC LIMIT ? OFFSET ?', [p.limit, p.offset])
+      const items = db
+        .select()
+        .from(auditLog)
+        .orderBy(desc(auditLog.at))
+        .limit(p.limit)
+        .offset(p.offset)
+        .all()
       return { items: items.map((a) => ({ ...a, detail: a.detail_json ? JSON.parse(a.detail_json) : null })) }
     }, { requireSession: true })
     .get('/apply-ops', ({ query }) => {

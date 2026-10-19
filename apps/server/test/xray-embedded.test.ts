@@ -9,7 +9,9 @@ import {
 } from '../src/xray/release'
 import { EMBEDDED_XRAY } from '../src/xray/embedded.generated'
 import { materializeEmbeddedXray, resetEmbeddedCache } from '../src/xray/embedded'
-import { Db } from '../src/core/db'
+import { eq } from 'drizzle-orm'
+import { openDb } from '../src/core/db'
+import { settings as settingsTable } from '../src/core/schema'
 import { SettingsStore } from '../src/core/settings'
 
 describe('Xray 打包目标映射', () => {
@@ -160,17 +162,19 @@ describe('Xray 发行 zip 提取', () => {
 
 describe('后台不再提供 Xray 版本固定', () => {
   test('老数据库里的 xray.versionPin 会被丢弃且不再回写', () => {
-    const db = new Db(':memory:')
+    const db = openDb(':memory:')
     db.exec('CREATE TABLE settings (key TEXT PRIMARY KEY, value_json TEXT NOT NULL, updated_at INTEGER NOT NULL)')
-    db.run('INSERT INTO settings (key, value_json, updated_at) VALUES (?, ?, ?)', [
-      'root',
-      JSON.stringify({ xray: { versionPin: 'v1.2.3', binary: 'xray' } }),
-      Date.now(),
-    ])
+    db.insert(settingsTable)
+      .values({
+        key: 'root',
+        value_json: JSON.stringify({ xray: { versionPin: 'v1.2.3', binary: 'xray' } }),
+        updated_at: Date.now(),
+      })
+      .run()
     const store = new SettingsStore(db)
     expect('versionPin' in store.get().xray).toBe(false)
     store.update({ panel: { language: 'zh-CN' } })
-    const row = db.get<{ value_json: string }>('SELECT value_json FROM settings WHERE key = ?', ['root'])!
+    const row = db.select({ value_json: settingsTable.value_json }).from(settingsTable).where(eq(settingsTable.key, 'root')).get()!
     expect('versionPin' in (JSON.parse(row.value_json) as { xray: Record<string, unknown> }).xray).toBe(false)
     db.close()
   })
