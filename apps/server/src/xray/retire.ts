@@ -88,6 +88,19 @@ export class RetireQueue {
     return new Set(rows.map((r) => r.tag))
   }
 
+  /**
+   * 节点在退休窗口内被重新加入数据面（检测按需补建 / 对账重放）时，取消对应 tag 的待删除；
+   * 否则到点的 rmo 会把刚恢复的 outbound 删掉，造成「刚检查可用、随后又漂移」。
+   */
+  cancelTags(tags: string[]): void {
+    if (tags.length === 0) return
+    this.db
+      .update(pendingRetire)
+      .set({ done_at: Date.now(), error: null })
+      .where(and(inArray(pendingRetire.tag, tags), isNull(pendingRetire.done_at)))
+      .run()
+  }
+
   /** tag 已经被移除（幂等成功）：xray api 对不存在的 tag 会报错，按文案识别 */
   private alreadyGone(stderr: string): boolean {
     return /not found|not exist|no such|unknown|already|does not exist|failed to find|cannot find/i.test(stderr)

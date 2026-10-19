@@ -23,7 +23,7 @@ export interface DetectTarget {
 export interface CheckResult {
   nodeId: string
   ok: boolean
-  stageReached: 'gateway' | 'handshake' | 'http' | 'exit_ip'
+  stageReached: 'xray' | 'gateway' | 'handshake' | 'http' | 'exit_ip'
   connectMs?: number
   handshakeMs?: number
   totalMs?: number
@@ -39,8 +39,16 @@ export interface DetectDeps {
   settings: SettingsStore
   events: EventBus
   cli: XrayCli
-  /** 网关地址与是否可用（检测走网关，D7） */
+  /** 网关地址与是否可用（probeVia=gateway 时使用，D7） */
   gatewayInfo: () => { host: string; port: number; enabled: boolean }
+  /**
+   * 按需把节点加入数据面并返回它的环回入站端口（AC-12：检测先于发布）。
+   * 检测直连 Xray 的每节点环回入站，因此节点必须先由 ApplyEngine 建好。
+   */
+  ensureNode: (nodeId: string) => Promise<
+    | { ok: true; port: number; release?: () => Promise<void> }
+    | { ok: false; errorMsg: string }
+  >
 }
 
 /** 检测并发信号量（§8.4 硬性要求） */
@@ -150,67 +158,101 @@ export class Detector {
   async checkOne(target: DetectTarget, depth: 'lite' | 'full' = 'full'): Promise<CheckResult> {
     const s = this.deps.settings.get()
     const gw = this.deps.gatewayInfo()
+    const via: 'gateway' | 'direct' = s.detect.probeVia === 'gateway' ? 'gateway' : 'direct'
     const started = Date.now()
-    const result: CheckResult = { nodeId: target.nodeId, ok: false, stageReached: 'gateway' }
+    const result: CheckResult = { nodeId: target.nodeId, ok: false, stageReached: via === 'direct' ? 'xray' : 'gateway' }
 
-    if (!gw.enabled) {
+    if (via === 'gateway' && !gw.enabled) {
       return { ...result, errorKind: 'gateway_unreachable', errorMsg: '网关未启用', totalMs: Date.now() - started }
     }
 
-    // S1：网关可达（TCP + 认证）
-    const tcp = await tcpConnect(gw.host, gw.port, s.detect.tcpTimeoutMs)
-    result.connectMs = tcp.ms
-    if (!tcp.ok) {
-      return { ...result, totalMs: Date.now() - started, errorKind: 'gateway_unreachable', errorMsg: tcp.errorMsg ?? '网关不可达' }
-    }
-    result.stageReached = 'handshake'
-
-    // 轻量模式：只做 S1（§8.1 lite）
-    if (depth === 'lite') {
-      return { ...result, ok: true, stageReached: 'gateway', totalMs: Date.now() - started }
+    // S0：确保节点已进入数据面，并拿到该节点的环回入站端口。
+    // 检测不再要求「先发布」：未发布的节点在这里按需加入数据面（与对账共用 ApplyEngine）。
+    // 隔离节点（healthy_only 策略下不在期望状态）是临时加入，探测完立即移除。
+    const ready = await this.deps.ensureNode(target.nodeId)
+    if (!ready.ok) {
+      return { ...result, totalMs: Date.now() - started, errorKind: 'xray_down', errorMsg: ready.errorMsg }
     }
 
-    const proxyUrl = 'http://' + encodeURIComponent(target.username) + ':' + encodeURIComponent(target.password) + '@' + gw.host + ':' + gw.port
-
-    // S2：经节点真实请求
-    const s2 = await fetchViaProxy(s.detect.testUrl, proxyUrl, s.detect.totalTimeoutMs)
-    result.handshakeMs = s2.ms
-    result.httpStatus = s2.status
-    if (!s2.ok) {
-      return {
-        ...result,
-        totalMs: Date.now() - started,
-        errorKind: s2.errorKind ?? 'empty_reply',
-        errorMsg: s2.errorMsg ?? '经节点请求失败',
-      }
-    }
-    result.stageReached = 'http'
-
-    // S3：出口确认
-    let exit: ExitInfo | undefined
-    let lastErr: { kind?: ErrorKind; msg?: string } = {}
-    for (const echo of s.detect.ipEchoUrls) {
-      const s3 = await fetchViaProxy(echo, proxyUrl, s.detect.totalTimeoutMs)
-      if (s3.ok && s3.body) {
-        const info = parseExitInfo(s3.body)
-        if (info.ip) {
-          exit = info
-          break
+    try {
+      // S1：节点环回入站可达（direct）或网关可达（gateway）
+      const probeHost = via === 'direct' ? '127.0.0.1' : gw.host
+      const probePort = via === 'direct' ? ready.port : gw.port
+      const tcp = await tcpConnect(probeHost, probePort, s.detect.tcpTimeoutMs)
+      result.connectMs = tcp.ms
+      if (!tcp.ok) {
+        return {
+          ...result,
+          totalMs: Date.now() - started,
+          errorKind: via === 'direct' ? (tcp.errorKind ?? 'xray_down') : 'gateway_unreachable',
+          errorMsg: via === 'direct' ? 'Xray 节点入站不可达：' + (tcp.errorMsg ?? '') : (tcp.errorMsg ?? '网关不可达'),
         }
-        lastErr = { kind: 'ip_echo_failed', msg: 'IP 回显缺少 IP 字段' }
-      } else {
-        lastErr = { kind: s3.errorKind ?? 'ip_echo_failed', msg: s3.errorMsg ?? 'IP 回显失败' }
+      }
+      result.stageReached = 'handshake'
+
+      // direct：127.0.0.1:<节点环回端口> 本身就是 Xray 的 HTTP 代理，无需凭据；
+      // gateway：仍用节点凭据经网关认证，测对外真实路径。
+      const proxyUrl =
+        via === 'direct'
+          ? 'http://127.0.0.1:' + ready.port
+          : 'http://' + encodeURIComponent(target.username) + ':' + encodeURIComponent(target.password) + '@' + gw.host + ':' + gw.port
+
+      // S2：经节点真实请求
+      const s2 = await fetchViaProxy(s.detect.testUrl, proxyUrl, s.detect.totalTimeoutMs)
+      result.handshakeMs = s2.ms
+      result.httpStatus = s2.status
+      if (!s2.ok) {
+        return {
+          ...result,
+          totalMs: Date.now() - started,
+          errorKind: s2.errorKind ?? 'empty_reply',
+          errorMsg: s2.errorMsg ?? '经节点请求失败',
+        }
+      }
+      result.stageReached = 'http'
+
+      // 轻量模式：S1 + S2（不发 S3 出口查询）。只测环回入站 TCP 会把死节点判活，
+      // 所以 lite 也必须真实过一次节点；省掉的是出口 IP 查询这一段。
+      if (depth === 'lite') {
+        result.totalMs = Date.now() - started
+        result.ok = true
+        return result
+      }
+
+      // S3：出口确认
+      let exit: ExitInfo | undefined
+      let lastErr: { kind?: ErrorKind; msg?: string } = {}
+      for (const echo of s.detect.ipEchoUrls) {
+        const s3 = await fetchViaProxy(echo, proxyUrl, s.detect.totalTimeoutMs)
+        if (s3.ok && s3.body) {
+          const info = parseExitInfo(s3.body)
+          if (info.ip) {
+            exit = info
+            break
+          }
+          lastErr = { kind: 'ip_echo_failed', msg: 'IP 回显缺少 IP 字段' }
+        } else {
+          lastErr = { kind: s3.errorKind ?? 'ip_echo_failed', msg: s3.errorMsg ?? 'IP 回显失败' }
+        }
+      }
+      result.totalMs = Date.now() - started
+      if (!exit) {
+        return { ...result, errorKind: lastErr.kind ?? 'ip_echo_failed', errorMsg: lastErr.msg ?? '未取到出口 IP' }
+      }
+      result.exit = exit
+      result.delayMs = result.handshakeMs
+      result.stageReached = 'exit_ip'
+      result.ok = true
+      return result
+    } finally {
+      if (ready.release) {
+        try {
+          await ready.release()
+        } catch (e) {
+          logger.warn('临时检测节点清理失败', { nodeId: target.nodeId, msg: e instanceof Error ? e.message : String(e) })
+        }
       }
     }
-    result.totalMs = Date.now() - started
-    if (!exit) {
-      return { ...result, errorKind: lastErr.kind ?? 'ip_echo_failed', errorMsg: lastErr.msg ?? '未取到出口 IP' }
-    }
-    result.exit = exit
-    result.delayMs = result.handshakeMs
-    result.stageReached = 'exit_ip'
-    result.ok = true
-    return result
   }
 
   /** 批量检测：信号量限流 + 每 20 条批量写（§8.4） */

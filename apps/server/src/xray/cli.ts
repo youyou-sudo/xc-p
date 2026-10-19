@@ -1,4 +1,4 @@
-import { mkdtemp, writeFile, rm } from 'node:fs/promises'
+import { mkdir, mkdtemp, writeFile, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { logger } from '../core/log'
@@ -8,6 +8,8 @@ export interface XrayCliOptions {
   binary: () => string
   server: () => string
   timeoutSec: () => number
+  /** 临时载荷根目录；默认 os.tmpdir()。打包版在部分 Windows 环境下对 %TEMP% 无写权限，必须可覆盖。 */
+  tmpDir?: () => string
 }
 
 export interface XrayApiResult {
@@ -87,7 +89,9 @@ export class XrayCli {
   /** 写临时 JSON 载荷（ado/adi/adrules 需要文件参数） */
   async writePayload(name: string, payload: unknown): Promise<string> {
     if (!this.tempRoot) {
-      this.tempRoot = await mkdtemp(join(tmpdir(), 'xcp-xray-'))
+      const root = this.opts.tmpDir?.() || tmpdir()
+      await mkdir(root, { recursive: true })
+      this.tempRoot = await mkdtemp(join(root, 'xcp-xray-'))
     }
     const file = join(this.tempRoot, name)
     await writeFile(file, JSON.stringify(payload, null, 2), 'utf8')

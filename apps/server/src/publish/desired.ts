@@ -48,7 +48,7 @@ export function buildDesiredNodes(
   db: Db,
   settings: SettingsStore,
   ports: PortPool,
-  opts: { now?: number } = {},
+  opts: { now?: number; nodeIds?: string[]; includeQuarantined?: boolean } = {},
 ): DesiredResult {
   const now = opts.now ?? Date.now()
   const s = settings.get()
@@ -90,7 +90,7 @@ export function buildDesiredNodes(
     const expired = row.missing_since !== null && row.stale_until !== null && row.stale_until <= now
     const effectivePolicy = row.publish_policy_override || policy
     const quarantined = row.state === 'quarantined'
-    if (quarantined && effectivePolicy !== 'all_enabled') {
+    if (quarantined && effectivePolicy !== 'all_enabled' && !opts.includeQuarantined) {
       skippedQuarantined++
       continue
     }

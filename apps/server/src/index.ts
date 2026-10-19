@@ -30,6 +30,7 @@ import { RetireQueue } from './xray/retire'
 import { Gateway } from './gateway/server'
 import type { GatewayConfig } from './gateway/types'
 import { buildDesiredNodes } from './publish/desired'
+import type { ApplyPlan } from './xray/plan'
 import { buildApp } from './app'
 import { canBind } from './xray/ports'
 import type { AppContext, HealthReport } from './context'
@@ -93,6 +94,7 @@ async function main() {
     binary: () => resolveBin()?.path ?? settings.get().xray.binary,
     server: () => settings.get().xray.apiAddress,
     timeoutSec: () => settings.get().xray.apiTimeoutSec,
+    tmpDir: () => paths.tmp,
   })
   const ports = new PortPool(db, settings)
   ports.reap()
@@ -174,6 +176,100 @@ async function main() {
 
   const engine = new ApplyEngine({ db, cli, settings, events, routing, retire })
   const reconciler = new Reconciler({ db, cli, settings, events, engine: () => engine, retire })
+
+  /**
+   * 检测前的数据面准备（PANEL.md AC-12：加订阅 → 同步 → 检测 → 发布）。
+   * 检测走 Xray 的每节点环回入站，所以节点必须先由 ApplyEngine 建好；
+   * 这里按需补建，不产生 runtime revision（与启动重放一致）。
+   */
+  const ensureNodeInDataplane = async (
+    nodeId: string,
+  ): Promise<
+    { ok: true; port: number; release?: () => Promise<void> } | { ok: false; errorMsg: string }
+  > => {
+    const build = (includeQuarantined: boolean) =>
+      buildDesiredNodes(db, settings, ports, { nodeIds: [nodeId], includeQuarantined })
+    const built = build(false)
+    let desired = built.desired.find((d) => d.nodeId === nodeId)
+    let temporary = false
+    if (!desired) {
+      // 被隔离的节点在 healthy_only 策略下不在期望状态，但检测必须还能测它，
+      // 否则隔离后永远无法恢复。临时加进数据面，探测完由 release 立即移除。
+      const quarantined = build(true).desired.find((d) => d.nodeId === nodeId)
+      if (quarantined) {
+        desired = quarantined
+        temporary = true
+      }
+    }
+    if (!desired) {
+      const detail = built.errors.find((e) => e.nodeId === nodeId)?.message
+      return {
+        ok: false,
+        errorMsg: detail ?? '节点不在可发布期望状态（未启用或协议不支持），无法进入数据面',
+      }
+    }
+    const node = desired
+    const appliedOf = () => engine.loadedApplied().find((a) => a.nodeId === nodeId)
+    const inSync = (a: ReturnType<typeof appliedOf>) =>
+      !!a && a.contentHash === node.contentHash && a.port === node.inboundPort
+    if (inSync(appliedOf())) return { ok: true, port: node.inboundPort }
+
+    const prev = appliedOf()
+    const plan: ApplyPlan = {
+      add: prev ? [] : [node],
+      change: prev ? [{ next: node, prev }] : [],
+      remove: prev
+        ? [
+            {
+              nodeId: prev.nodeId,
+              outboundTag: prev.outboundTag,
+              inboundTag: prev.inboundTag,
+              ruleTag: prev.ruleTag,
+              port: prev.port,
+            },
+          ]
+        : [],
+      keep: [],
+      drift: { outboundTags: [], inboundTags: [], ruleTags: [] },
+      cleanup: [],
+      missingInDataplane: [],
+    }
+    const res = await engine.applyPlan(plan, null)
+    if (!res.ok) {
+      return { ok: false, errorMsg: '节点进入数据面失败：' + (res.error?.message ?? '未知错误') }
+    }
+    if (!inSync(appliedOf())) {
+      return { ok: false, errorMsg: '节点未能进入数据面（构建校验未通过，详见该节点的发布错误）' }
+    }
+    const release = temporary
+      ? async () => {
+          const current = engine.loadedApplied().find((a) => a.nodeId === nodeId)
+          if (!current || current.contentHash !== node.contentHash || current.port !== node.inboundPort) return
+          await engine.applyPlan(
+            {
+              add: [],
+              change: [],
+              remove: [
+                {
+                  nodeId: node.nodeId,
+                  outboundTag: node.outboundTag,
+                  inboundTag: node.inboundTag,
+                  ruleTag: node.ruleTag,
+                  port: node.inboundPort,
+                },
+              ],
+              keep: [],
+              drift: { outboundTags: [], inboundTags: [], ruleTags: [] },
+              cleanup: [],
+              missingInDataplane: [],
+            },
+            null,
+          )
+        }
+      : undefined
+    return { ok: true, port: node.inboundPort, release }
+  }
+
   const gatewayInfo = () => {
     const { host, port } = parseListen(settings.get().gateway.listen)
     return { host, port, enabled: settings.get().gateway.enabled }
@@ -184,6 +280,7 @@ async function main() {
     events,
     cli,
     gatewayInfo,
+    ensureNode: ensureNodeInDataplane,
   })
   const publisher = new Publisher({
     db,
